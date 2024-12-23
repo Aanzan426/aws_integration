@@ -73,9 +73,29 @@ class AWSSettings(Document):
 
         try:
             response = self.ses_client.send_email(**send_args)
+            message_id = response.get("MessageId")
+            if not message_id:
+                frappe.throw(_("Failed to send email. Please try again."))
+            self.add_ses_logs(subject, content or html, message_id, destinations)
             return response
         except ClientError as e:
             frappe.log_error(
                 _("Failed to send email: {error}").format(error=str(e)),
                 frappe.get_traceback(),
             )
+
+    def add_ses_logs(self, subject, message, message_id, destinations):
+        """Add SES logs after sending email."""
+        ses_log = frappe.get_doc(
+            {
+                "doctype": "AWS SES Logs",
+                "message_id": message_id,
+                "subject": subject,
+                "message": message,
+                "status": "Sent",
+                "from": self.source_email,
+            }
+        )
+        recipients = (destinations.tos or []) + (destinations.ccs or []) + (destinations.bccs or [])
+        ses_log.recepients = ", ".join(recipients)
+        ses_log.insert()

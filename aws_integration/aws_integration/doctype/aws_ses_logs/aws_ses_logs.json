@@ -1,0 +1,95 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "creation": "2024-12-23 14:10:37.209083",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "from",
+  "message_id",
+  "column_break_brxy",
+  "status",
+  "subject",
+  "section_break_ciyw",
+  "message",
+  "recepients"
+ ],
+ "fields": [
+  {
+   "fieldname": "from",
+   "fieldtype": "Data",
+   "label": "From"
+  },
+  {
+   "fieldname": "message",
+   "fieldtype": "Long Text",
+   "label": "Message"
+  },
+  {
+   "fieldname": "message_id",
+   "fieldtype": "Data",
+   "label": "Message ID",
+   "read_only": 1
+  },
+  {
+   "fieldname": "subject",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Subject"
+  },
+  {
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Status",
+   "options": "Not Sent\nSent",
+   "read_only": 1
+  },
+  {
+   "fieldname": "recepients",
+   "fieldtype": "Small Text",
+   "label": "Recepients"
+  },
+  {
+   "fieldname": "column_break_brxy",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "section_break_ciyw",
+   "fieldtype": "Section Break"
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "links": [],
+ "modified": "2024-12-23 14:37:51.709403",
+ "modified_by": "Administrator",
+ "module": "Aws Integration",
+ "name": "AWS SES Logs",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [
+  {
+   "color": "Gray",
+   "title": "Not Sent"
+  },
+  {
+   "color": "Green",
+   "title": "Sent"
+  }
+ ]
+}

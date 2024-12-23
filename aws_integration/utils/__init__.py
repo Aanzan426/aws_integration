@@ -56,13 +56,7 @@ def sendmail(subject, message, recepient, cc_recepient, bcc_recepient, reply_tos
     else:
         email_params["content"] = message
 
-    response = email_sender.send_email(**email_params)
-
-    message_id = response.get("MessageId")
-    if not message_id:
-        frappe.throw(_("Failed to send email. Please try again."))
-
-    return message_id
+    return email_sender.send_email(**email_params)
 
 
 def send_email_in_batches(data):

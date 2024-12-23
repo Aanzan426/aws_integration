@@ -1,0 +1,97 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "creation": "2024-12-23 11:05:21.553827",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "general_settings_section",
+  "aws_access_key_id",
+  "column_break_licj",
+  "aws_secret_access_key",
+  "region",
+  "ses_settings_section",
+  "source_email",
+  "column_break_kjvj",
+  "sender_name",
+  "email_batch_size"
+ ],
+ "fields": [
+  {
+   "fieldname": "column_break_licj",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "region",
+   "fieldtype": "Select",
+   "label": "Region",
+   "options": "\naf-south-1\nap-east-1\nap-northeast-1\nap-northeast-2\nap-northeast-3\nap-south-1\nap-south-2\nap-southeast-1\nap-southeast-2\nap-southeast-3\nap-southeast-5\nca-central-1\nca-west-1\neu-central-1\neu-central-2\neu-north-1\neu-south-1\neu-south-2\neu-west-1\neu-west-2\neu-west-3\nil-central-1\nme-central-1\nme-south-1\nsa-east-1\nus-east-1\nus-east-2\nus-gov-east-1\nus-gov-west-1\nus-west-1\nus-west-2"
+  },
+  {
+   "fieldname": "general_settings_section",
+   "fieldtype": "Section Break",
+   "label": "General Settings"
+  },
+  {
+   "fieldname": "ses_settings_section",
+   "fieldtype": "Section Break",
+   "label": "SES Settings"
+  },
+  {
+   "default": "1",
+   "description": "Number of Emails to be Sent per second",
+   "fieldname": "email_batch_size",
+   "fieldtype": "Int",
+   "label": "Email Batch Size"
+  },
+  {
+   "fieldname": "column_break_kjvj",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "Sender name shown in Emails",
+   "fieldname": "sender_name",
+   "fieldtype": "Data",
+   "label": "Sender Name"
+  },
+  {
+   "description": "Source Email",
+   "fieldname": "source_email",
+   "fieldtype": "Data",
+   "label": "Source Email"
+  },
+  {
+   "fieldname": "aws_access_key_id",
+   "fieldtype": "Data",
+   "label": "AWS Access Key ID"
+  },
+  {
+   "fieldname": "aws_secret_access_key",
+   "fieldtype": "Password",
+   "label": "AWS Secret Access Key"
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "issingle": 1,
+ "links": [],
+ "modified": "2024-12-23 13:29:19.102818",
+ "modified_by": "Administrator",
+ "module": "Aws Integration",
+ "name": "AWS Settings",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": []
+}

@@ -5,6 +5,7 @@
  "doctype": "DocType",
  "engine": "InnoDB",
  "field_order": [
+  "enable_aws",
   "general_settings_section",
   "aws_access_key_id",
   "column_break_licj",
@@ -28,11 +29,13 @@
    "options": "\naf-south-1\nap-east-1\nap-northeast-1\nap-northeast-2\nap-northeast-3\nap-south-1\nap-south-2\nap-southeast-1\nap-southeast-2\nap-southeast-3\nap-southeast-5\nca-central-1\nca-west-1\neu-central-1\neu-central-2\neu-north-1\neu-south-1\neu-south-2\neu-west-1\neu-west-2\neu-west-3\nil-central-1\nme-central-1\nme-south-1\nsa-east-1\nus-east-1\nus-east-2\nus-gov-east-1\nus-gov-west-1\nus-west-1\nus-west-2"
   },
   {
+   "depends_on": "enable_aws",
    "fieldname": "general_settings_section",
    "fieldtype": "Section Break",
    "label": "General Settings"
   },
   {
+   "depends_on": "enable_aws",
    "fieldname": "ses_settings_section",
    "fieldtype": "Section Break",
    "label": "SES Settings"
@@ -69,12 +72,18 @@
    "fieldname": "aws_secret_access_key",
    "fieldtype": "Password",
    "label": "AWS Secret Access Key"
+  },
+  {
+   "default": "0",
+   "fieldname": "enable_aws",
+   "fieldtype": "Check",
+   "label": "Enable AWS"
   }
  ],
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2024-12-23 13:29:19.102818",
+ "modified": "2025-01-07 10:10:24.775538",
  "modified_by": "Administrator",
  "module": "Aws Integration",
  "name": "AWS Settings",

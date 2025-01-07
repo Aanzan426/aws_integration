@@ -10,6 +10,9 @@ from aws_integration.utils import validate_email
 
 class AWSSettings(Document):
 
+    def before_save(self):
+        self.handle_email_flush()
+
     def get_ses_client(self):
         aws_secret_access_key = self.get_password("aws_secret_access_key")
         return boto3.client(
@@ -22,7 +25,6 @@ class AWSSettings(Document):
     def validate(self):
         if self.source_email and not validate_email(self.source_email):
             frappe.throw("Please enter valid email address")
-
 
     def send_email(
         self,
@@ -96,6 +98,34 @@ class AWSSettings(Document):
                 "from": self.source_email,
             }
         )
-        recipients = (destinations.tos or []) + (destinations.ccs or []) + (destinations.bccs or [])
+        recipients = (
+            (destinations.tos or [])
+            + (destinations.ccs or [])
+            + (destinations.bccs or [])
+        )
         ses_log.recepients = ", ".join(recipients)
         ses_log.insert()
+
+
+    def handle_email_flush(self):
+        methods = [
+            ("frappe.email.queue.flush", not self.enable_aws),
+            ("aws_integration.utils.email.flush_email_queue", self.enable_aws)
+        ]
+        
+        for method, enable in methods:
+            self.email_flush_handler(method, enable)
+    
+    def email_flush_handler(self, method_name, enable=True):
+        """
+        Enable or disable the email flush job.
+        """
+        try:
+            job = frappe.get_doc("Scheduled Job Type", {"method": method_name})
+            job.stopped = not enable
+            job.save()
+        except frappe.DoesNotExistError:
+            frappe.log_error(
+                f"Failed to disable {method_name} job. Please disable it manually.",
+                frappe.get_traceback(),
+            )

@@ -151,6 +151,12 @@ app_license = "apache-2.0"
 # Scheduled Tasks
 # ---------------
 
+scheduler_events = {
+	"all": [
+		"aws_integration.utils.email.flush_email_queue"
+	]
+}
+
 # scheduler_events = {
 # 	"all": [
 # 		"aws_integration.tasks.all"

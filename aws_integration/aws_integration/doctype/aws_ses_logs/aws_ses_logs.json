@@ -12,7 +12,11 @@
   "subject",
   "section_break_ciyw",
   "message",
-  "recepients"
+  "recepients",
+  "section_break_ryxq",
+  "cc_recepients",
+  "column_break_uqzw",
+  "bcc_recepients"
  ],
  "fields": [
   {
@@ -57,11 +61,29 @@
   {
    "fieldname": "section_break_ciyw",
    "fieldtype": "Section Break"
+  },
+  {
+   "fieldname": "section_break_ryxq",
+   "fieldtype": "Section Break"
+  },
+  {
+   "fieldname": "cc_recepients",
+   "fieldtype": "Small Text",
+   "label": "CC Recepients"
+  },
+  {
+   "fieldname": "column_break_uqzw",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "bcc_recepients",
+   "fieldtype": "Small Text",
+   "label": "BCC Recepients"
   }
  ],
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2024-12-23 14:37:51.709403",
+ "modified": "2025-02-17 13:59:08.574824",
  "modified_by": "Administrator",
  "module": "Aws Integration",
  "name": "AWS SES Logs",

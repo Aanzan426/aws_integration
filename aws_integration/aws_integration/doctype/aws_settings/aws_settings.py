@@ -80,7 +80,7 @@ class AWSSettings(Document):
                 frappe.throw(_("Failed to send email. Please try again."))
             self.add_ses_logs(subject, content or html, message_id, destinations)
             return response
-        except ClientError as e:
+        except Exception as e:
             frappe.log_error(
                 _("Failed to send email: {error}").format(error=str(e)),
                 frappe.get_traceback(),
@@ -98,13 +98,10 @@ class AWSSettings(Document):
                 "from": self.source_email,
             }
         )
-        recipients = (
-            (destinations.tos or [])
-            + (destinations.ccs or [])
-            + (destinations.bccs or [])
-        )
-        ses_log.recepients = ", ".join(recipients)
-        ses_log.insert()
+        ses_log.recepients = ", ".join(destinations.tos or [])
+        ses_log.cc_recepients = ", ".join(destinations.ccs or [])
+        ses_log.bcc_recepients = ", ".join(destinations.bccs or [])
+        ses_log.insert(ignore_permissions=True)
 
 
     def handle_email_flush(self):

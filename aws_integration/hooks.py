@@ -44,6 +44,9 @@ app_license = "apache-2.0"
 
 # include js in doctype views
 # doctype_js = {"doctype" : "public/js/doctype.js"}
+doctype_js = {
+    "File": "public/js/file.js"
+}
 # doctype_list_js = {"doctype" : "public/js/doctype_list.js"}
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
 # doctype_calendar_js = {"doctype" : "public/js/doctype_calendar.js"}
@@ -154,8 +157,26 @@ app_license = "apache-2.0"
 scheduler_events = {
 	"all": [
 		"aws_integration.utils.email.flush_email_queue"
+	],
+	"hourly": [
+		"aws_integration.s3.scheduler.upload_pending_files"
 	]
 }
+
+doc_events = {
+	"File": {
+		"after_insert": "aws_integration.s3.handlers.on_file_upload",
+		"on_trash": "aws_integration.s3.handlers.on_file_delete"
+	}
+}
+
+override_doctype_class = {
+    "File": "aws_integration.s3.overrides.S3File"
+}
+
+after_migrate = [
+    "aws_integration.s3.setup.after_migrate"
+]
 
 # scheduler_events = {
 # 	"all": [

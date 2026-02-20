@@ -3,7 +3,6 @@
 import boto3
 import frappe
 from frappe import _
-from botocore.exceptions import ClientError
 from frappe.model.document import Document
 from aws_integration.utils import validate_email
 
@@ -12,6 +11,24 @@ class AWSSettings(Document):
 
     def before_save(self):
         self.handle_email_flush()
+        self._warn_on_s3_disable()
+
+    def _warn_on_s3_disable(self):
+        """Warn the user when S3 is being disabled while files still exist on S3.
+
+        Uses get_doc_before_save() to detect a transition from enabled to
+        disabled. Emits an orange msgprint so the user can make an informed
+        decision — it does NOT block the save.
+        """
+        old = self.get_doc_before_save()
+        if old and old.enable_s3 and not self.enable_s3:
+            count = frappe.db.count("File", {"is_on_s3": 1})
+            if count:
+                frappe.msgprint(
+                    _("{0} files are stored on S3. Disabling S3 will make them inaccessible until S3 is re-enabled.").format(count),
+                    indicator="orange",
+                    title=_("Warning"),
+                )
 
     def get_ses_client(self):
         aws_secret_access_key = self.get_password("aws_secret_access_key")
@@ -23,6 +40,24 @@ class AWSSettings(Document):
         )
 
     def validate(self):
+        if self.enable_aws:
+            if not self.aws_access_key_id:
+                frappe.throw(_("AWS Access Key ID is required when AWS is enabled"))
+            if not self.aws_secret_access_key:
+                frappe.throw(_("AWS Secret Access Key is required when AWS is enabled"))
+
+        if self.enable_s3:
+            if not self.enable_aws:
+                frappe.throw(_("AWS must be enabled to use S3"))
+            if not self.s3_bucket_name:
+                frappe.throw(_("S3 Bucket Name is required when S3 is enabled"))
+            if self.s3_presigned_url_expiry and (
+                self.s3_presigned_url_expiry < 1 or self.s3_presigned_url_expiry > 604800
+            ):
+                frappe.throw(
+                    _("Presigned URL Expiry must be between 1 and 604800 seconds (7 days)")
+                )
+
         if self.source_email and not validate_email(self.source_email):
             frappe.throw("Please enter valid email address")
 
@@ -113,6 +148,12 @@ class AWSSettings(Document):
         for method, enable in methods:
             self.email_flush_handler(method, enable)
     
+    def test_s3_connection(self):
+        """Test S3 bucket connectivity."""
+        from aws_integration.s3.client import S3Client
+        client = S3Client()
+        return client.test_connection()
+
     def email_flush_handler(self, method_name, enable=True):
         """
         Enable or disable the email flush job.

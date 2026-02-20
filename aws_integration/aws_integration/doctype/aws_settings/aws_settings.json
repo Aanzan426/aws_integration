@@ -6,21 +6,73 @@
  "engine": "InnoDB",
  "field_order": [
   "enable_aws",
+  "column_break_zdyv",
+  "enable_s3",
+  "tab_break_general",
   "general_settings_section",
   "aws_access_key_id",
   "column_break_licj",
   "aws_secret_access_key",
   "region",
+  "tab_break_ses",
   "ses_settings_section",
   "source_email",
   "column_break_kjvj",
   "sender_name",
-  "email_batch_size"
+  "email_batch_size",
+  "tab_break_s3",
+  "s3_settings_section",
+  "s3_bucket_name",
+  "s3_presigned_url_expiry",
+  "column_break_s3_1",
+  "s3_bucket_region",
+  "s3_folder_prefix",
+  "s3_upload_settings_section",
+  "upload_to_s3_on_save",
+  "delete_local_after_upload",
+  "delete_s3_on_trash",
+  "column_break_s3_2",
+  "s3_batch_size",
+  "exempt_doctypes_section",
+  "exempt_doctypes",
+  "tab_break_s3_backups",
+  "s3_backup_settings_section",
+  "enable_s3_backups",
+  "s3_backup_bucket_name",
+  "column_break_s3_3",
+  "s3_backup_retention_days"
  ],
  "fields": [
   {
+   "default": "0",
+   "fieldname": "enable_aws",
+   "fieldtype": "Check",
+   "label": "Enable AWS"
+  },
+  {
+   "depends_on": "enable_aws",
+   "fieldname": "tab_break_general",
+   "fieldtype": "Tab Break",
+   "label": "General"
+  },
+  {
+   "fieldname": "general_settings_section",
+   "fieldtype": "Section Break",
+   "label": "AWS Credentials"
+  },
+  {
+   "fieldname": "aws_access_key_id",
+   "fieldtype": "Data",
+   "label": "AWS Access Key ID"
+  },
+  {
    "fieldname": "column_break_licj",
    "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "aws_secret_access_key",
+   "fieldtype": "Password",
+   "label": "AWS Secret Access Key"
   },
   {
    "fieldname": "region",
@@ -30,22 +82,20 @@
   },
   {
    "depends_on": "enable_aws",
-   "fieldname": "general_settings_section",
-   "fieldtype": "Section Break",
-   "label": "General Settings"
-  },
-  {
-   "depends_on": "enable_aws",
-   "fieldname": "ses_settings_section",
-   "fieldtype": "Section Break",
+   "fieldname": "tab_break_ses",
+   "fieldtype": "Tab Break",
    "label": "SES Settings"
   },
   {
-   "default": "1",
-   "description": "Number of Emails to be Sent per second",
-   "fieldname": "email_batch_size",
-   "fieldtype": "Int",
-   "label": "Email Batch Size"
+   "fieldname": "ses_settings_section",
+   "fieldtype": "Section Break",
+   "label": "Email Configuration"
+  },
+  {
+   "description": "Source Email",
+   "fieldname": "source_email",
+   "fieldtype": "Data",
+   "label": "Source Email"
   },
   {
    "fieldname": "column_break_kjvj",
@@ -58,32 +108,153 @@
    "label": "Sender Name"
   },
   {
-   "description": "Source Email",
-   "fieldname": "source_email",
-   "fieldtype": "Data",
-   "label": "Source Email"
+   "default": "1",
+   "description": "Number of Emails to be Sent per second",
+   "fieldname": "email_batch_size",
+   "fieldtype": "Int",
+   "label": "Email Batch Size"
   },
   {
-   "fieldname": "aws_access_key_id",
-   "fieldtype": "Data",
-   "label": "AWS Access Key ID"
+   "depends_on": "enable_s3",
+   "fieldname": "tab_break_s3",
+   "fieldtype": "Tab Break",
+   "label": "S3 Storage"
   },
   {
-   "fieldname": "aws_secret_access_key",
-   "fieldtype": "Password",
-   "label": "AWS Secret Access Key"
+   "fieldname": "s3_settings_section",
+   "fieldtype": "Section Break",
+   "label": "S3 Configuration"
   },
   {
    "default": "0",
-   "fieldname": "enable_aws",
+   "depends_on": "enable_aws",
+   "fieldname": "enable_s3",
    "fieldtype": "Check",
-   "label": "Enable AWS"
+   "label": "Enable S3 File Storage"
+  },
+  {
+   "fieldname": "s3_bucket_name",
+   "fieldtype": "Data",
+   "label": "S3 Bucket Name",
+   "mandatory_depends_on": "enable_s3"
+  },
+  {
+   "fieldname": "column_break_s3_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "Leave blank to use the same region as General Settings",
+   "fieldname": "s3_bucket_region",
+   "fieldtype": "Select",
+   "label": "S3 Bucket Region",
+   "options": "\naf-south-1\nap-east-1\nap-northeast-1\nap-northeast-2\nap-northeast-3\nap-south-1\nap-south-2\nap-southeast-1\nap-southeast-2\nap-southeast-3\nap-southeast-5\nca-central-1\nca-west-1\neu-central-1\neu-central-2\neu-north-1\neu-south-1\neu-south-2\neu-west-1\neu-west-2\neu-west-3\nil-central-1\nme-central-1\nme-south-1\nsa-east-1\nus-east-1\nus-east-2\nus-gov-east-1\nus-gov-west-1\nus-west-1\nus-west-2"
+  },
+  {
+   "description": "Prefix for S3 keys. Defaults to site name if blank.",
+   "fieldname": "s3_folder_prefix",
+   "fieldtype": "Data",
+   "label": "S3 Folder Prefix"
+  },
+  {
+   "depends_on": "enable_s3",
+   "fieldname": "s3_upload_settings_section",
+   "fieldtype": "Section Break",
+   "label": "Upload Settings"
+  },
+  {
+   "default": "0",
+   "description": "Upload files to S3 immediately when attached to ERP (via background job)",
+   "fieldname": "upload_to_s3_on_save",
+   "fieldtype": "Check",
+   "label": "Instant Upload to S3"
+  },
+  {
+   "default": "1",
+   "description": "When a file is deleted from S3, also delete it from ERP",
+   "fieldname": "delete_local_after_upload",
+   "fieldtype": "Check",
+   "label": "Delete Local File After S3 Upload"
+  },
+  {
+   "default": "1",
+   "description": "When a file is deleted from ERP, also delete it from S3",
+   "fieldname": "delete_s3_on_trash",
+   "fieldtype": "Check",
+   "label": "Delete S3 File on ERP Deletion"
+  },
+  {
+   "default": "50",
+   "description": "Number of files to process per batch for scheduled uploads, bulk migration, and local cleanup",
+   "fieldname": "s3_batch_size",
+   "fieldtype": "Int",
+   "label": "Batch Size"
+  },
+  {
+   "fieldname": "column_break_s3_2",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "900",
+   "description": "Presigned URL validity duration (default: 900 = 15 minutes)",
+   "fieldname": "s3_presigned_url_expiry",
+   "fieldtype": "Int",
+   "label": "Presigned URL Expiry (seconds)"
+  },
+  {
+   "depends_on": "enable_s3",
+   "description": "Files attached to these DocTypes will NOT be uploaded to S3",
+   "fieldname": "exempt_doctypes_section",
+   "fieldtype": "Section Break",
+   "label": "Exempt DocTypes"
+  },
+  {
+   "fieldname": "exempt_doctypes",
+   "fieldtype": "Table",
+   "label": "Exempt DocTypes",
+   "options": "S3 Exempt DocType"
+  },
+  {
+   "depends_on": "enable_s3",
+   "fieldname": "tab_break_s3_backups",
+   "fieldtype": "Tab Break",
+   "label": "S3 Backups"
+  },
+  {
+   "fieldname": "s3_backup_settings_section",
+   "fieldtype": "Section Break",
+   "label": "Backup Configuration"
+  },
+  {
+   "default": "0",
+   "fieldname": "enable_s3_backups",
+   "fieldtype": "Check",
+   "label": "Enable S3 Backups"
+  },
+  {
+   "description": "Leave blank to use the main S3 bucket",
+   "fieldname": "s3_backup_bucket_name",
+   "fieldtype": "Data",
+   "label": "Backup Bucket Name"
+  },
+  {
+   "fieldname": "column_break_s3_3",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "30",
+   "fieldname": "s3_backup_retention_days",
+   "fieldtype": "Int",
+   "label": "Backup Retention (Days)"
+  },
+  {
+   "fieldname": "column_break_zdyv",
+   "fieldtype": "Column Break"
   }
  ],
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2025-01-07 10:10:24.775538",
+ "modified": "2026-02-20 15:38:58.430203",
  "modified_by": "Administrator",
  "module": "Aws Integration",
  "name": "AWS Settings",
@@ -100,7 +271,9 @@
    "write": 1
   }
  ],
+ "row_format": "Dynamic",
  "sort_field": "creation",
  "sort_order": "DESC",
- "states": []
+ "states": [],
+ "track_changes": 1
 }

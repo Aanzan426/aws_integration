@@ -169,6 +169,47 @@ frappe.ui.form.on("AWS Settings", {
                 __("S3")
             );
 
+        }
+
+        if (frm.doc.enable_s3_backups) {
+            frm.add_custom_button(
+                __("Take Backup Now"),
+                function () {
+                    frappe.call({
+                        method: "aws_integration.s3.backup.take_s3_backup",
+                        freeze: true,
+                        freeze_message: __("Queuing S3 Backup..."),
+                        callback: function (r) {
+                            if (r.message && r.message.log_name) {
+                                frappe.msgprint({
+                                    title: __("Backup Queued"),
+                                    indicator: "blue",
+                                    message: __("Backup job {0} has been queued. Track progress below.", [r.message.log_name]),
+                                });
+                            }
+                        },
+                        error: function () {
+                            frappe.msgprint({
+                                title: __("Error"),
+                                indicator: "red",
+                                message: __("Failed to start S3 backup."),
+                            });
+                        },
+                    });
+                },
+                __("S3")
+            );
+
+            frm.add_custom_button(
+                __("Backup Logs"),
+                function () {
+                    frappe.set_route("List", "S3 Backup Log");
+                },
+                __("S3")
+            );
+        }
+
+        if (frm.doc.enable_aws && frm.doc.enable_s3) {
             // Listen for migration progress updates from the background job.
             // Use .off() first to prevent duplicate listeners on form refresh.
             frappe.realtime.off("s3_migration_progress");
@@ -211,6 +252,43 @@ frappe.ui.form.on("AWS Settings", {
                         data.deleted, data.missing, data.skipped
                     ]),
                 });
+            });
+
+            frappe.realtime.off("s3_backup_progress");
+            frappe.realtime.on("s3_backup_progress", function (data) {
+                if (data.status === "generating") {
+                    frappe.show_progress(
+                        __("S3 Backup"),
+                        33, 100,
+                        __("Generating backup files...")
+                    );
+                } else if (data.status === "uploading") {
+                    frappe.show_progress(
+                        __("S3 Backup"),
+                        66, 100,
+                        __("Uploading to S3...")
+                    );
+                } else if (data.status === "success") {
+                    frappe.hide_progress();
+                    let safe_name = frappe.utils.xss_sanitise(data.log_name || "");
+                    frappe.msgprint({
+                        title: __("Backup Complete"),
+                        indicator: "green",
+                        message: __("S3 backup completed successfully. View {0}.", [
+                            '<a href="/app/s3-backup-log/' + encodeURIComponent(safe_name) + '">' + safe_name + '</a>'
+                        ]),
+                    });
+                } else if (data.status === "failed") {
+                    frappe.hide_progress();
+                    let safe_fail_name = frappe.utils.xss_sanitise(data.log_name || "");
+                    frappe.msgprint({
+                        title: __("Backup Failed"),
+                        indicator: "red",
+                        message: __("S3 backup failed. Check {0} for details.", [
+                            '<a href="/app/s3-backup-log/' + encodeURIComponent(safe_fail_name) + '">' + safe_fail_name + '</a>'
+                        ]),
+                    });
+                }
             });
         }
     },

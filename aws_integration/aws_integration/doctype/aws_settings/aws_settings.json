@@ -8,6 +8,7 @@
   "enable_aws",
   "column_break_zdyv",
   "enable_s3",
+  "enable_s3_backups",
   "tab_break_general",
   "general_settings_section",
   "aws_access_key_id",
@@ -37,11 +38,22 @@
   "exempt_doctypes_section",
   "exempt_doctypes",
   "tab_break_s3_backups",
-  "s3_backup_settings_section",
-  "enable_s3_backups",
+  "s3_backup_config_section",
+  "s3_backup_frequency",
+  "column_break_s3_backup_1",
+  "s3_backup_files",
+  "s3_backup_storage_section",
   "s3_backup_bucket_name",
-  "column_break_s3_3",
-  "s3_backup_retention_days"
+  "column_break_s3_backup_2",
+  "s3_backup_folder_prefix",
+  "s3_backup_retention_section",
+  "s3_backup_retention_count",
+  "column_break_s3_backup_ret",
+  "s3_backup_retention_days",
+  "s3_backup_notify_section",
+  "s3_backup_notify_email",
+  "column_break_s3_backup_3",
+  "s3_backup_notify_success"
  ],
  "fields": [
   {
@@ -132,6 +144,13 @@
    "fieldname": "enable_s3",
    "fieldtype": "Check",
    "label": "Enable S3 File Storage"
+  },
+  {
+   "default": "0",
+   "depends_on": "enable_s3",
+   "fieldname": "enable_s3_backups",
+   "fieldtype": "Check",
+   "label": "Enable S3 Backups"
   },
   {
    "fieldname": "s3_bucket_name",
@@ -226,31 +245,107 @@
    "label": "S3 Backups"
   },
   {
-   "fieldname": "s3_backup_settings_section",
+   "depends_on": "enable_s3_backups",
+   "fieldname": "s3_backup_config_section",
    "fieldtype": "Section Break",
    "label": "Backup Configuration"
   },
   {
-   "default": "0",
-   "fieldname": "enable_s3_backups",
-   "fieldtype": "Check",
-   "label": "Enable S3 Backups"
+   "default": "Daily",
+   "depends_on": "enable_s3_backups",
+   "fieldname": "s3_backup_frequency",
+   "fieldtype": "Select",
+   "label": "Backup Frequency",
+   "mandatory_depends_on": "enable_s3_backups",
+   "options": "Daily\nWeekly\nMonthly\nNone"
   },
   {
+   "fieldname": "column_break_s3_backup_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "1",
+   "depends_on": "enable_s3_backups",
+   "description": "Include public and private file tarballs in backup",
+   "fieldname": "s3_backup_files",
+   "fieldtype": "Check",
+   "label": "Backup Files"
+  },
+  {
+   "depends_on": "enable_s3_backups",
+   "fieldname": "s3_backup_storage_section",
+   "fieldtype": "Section Break",
+   "label": "Backup Storage"
+  },
+  {
+   "depends_on": "enable_s3_backups",
    "description": "Leave blank to use the main S3 bucket",
    "fieldname": "s3_backup_bucket_name",
    "fieldtype": "Data",
    "label": "Backup Bucket Name"
   },
   {
-   "fieldname": "column_break_s3_3",
+   "fieldname": "column_break_s3_backup_2",
    "fieldtype": "Column Break"
   },
   {
-   "default": "30",
+   "depends_on": "enable_s3_backups",
+   "description": "S3 key prefix for backups",
+   "fieldname": "s3_backup_folder_prefix",
+   "fieldtype": "Data",
+   "label": "Backup Folder Path"
+  },
+  {
+   "depends_on": "enable_s3_backups",
+   "fieldname": "s3_backup_retention_section",
+   "fieldtype": "Section Break",
+   "label": "Retention"
+  },
+  {
+   "default": "0",
+   "depends_on": "enable_s3_backups",
+   "description": "Keep only the last N backups on S3. Set 0 to disable.",
+   "fieldname": "s3_backup_retention_count",
+   "fieldtype": "Int",
+   "label": "Keep Last N Backups"
+  },
+  {
+   "fieldname": "column_break_s3_backup_ret",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "0",
+   "depends_on": "enable_s3_backups",
+   "description": "Delete backups older than N days from S3. Set 0 to disable.",
    "fieldname": "s3_backup_retention_days",
    "fieldtype": "Int",
-   "label": "Backup Retention (Days)"
+   "label": "Delete Backups Older Than (days)"
+  },
+  {
+   "depends_on": "enable_s3_backups",
+   "fieldname": "s3_backup_notify_section",
+   "fieldtype": "Section Break",
+   "label": "Notifications"
+  },
+  {
+   "depends_on": "enable_s3_backups",
+   "description": "Email address to receive backup notifications",
+   "fieldname": "s3_backup_notify_email",
+   "fieldtype": "Data",
+   "label": "Notify Email",
+   "mandatory_depends_on": "enable_s3_backups"
+  },
+  {
+   "fieldname": "column_break_s3_backup_3",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "0",
+   "depends_on": "enable_s3_backups",
+   "description": "Send email notification even when backup succeeds",
+   "fieldname": "s3_backup_notify_success",
+   "fieldtype": "Check",
+   "label": "Send Email for Successful Backup"
   },
   {
    "fieldname": "column_break_zdyv",

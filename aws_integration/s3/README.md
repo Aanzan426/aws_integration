@@ -118,6 +118,160 @@ aws_integration/
 | `aws_integration.api.s3.test_s3_connection` | System Manager | Test S3 bucket connectivity |
 | `aws_integration.api.s3.migrate_files_to_s3` | System Manager | Enqueue bulk migration job |
 
+---
+
+# S3 Backups
+
+Automated site backups (database, site config, public/private files) uploaded directly to S3 with scheduling, progress tracking, email notifications, and retention-based rotation.
+
+## Features
+
+- **On-Demand Backup** — "Take Backup Now" button in AWS Settings
+- **Scheduled Backups** — Daily, Weekly, or Monthly via Frappe scheduler
+- **Realtime Progress** — Progress bar in AWS Settings (generating → uploading → success/failed)
+- **Backup Log** — `S3 Backup Log` DocType tracks every run with status, S3 keys, file sizes, and errors
+- **Retention Policies** — Keep last N backups and/or delete backups older than N days from S3
+- **Email Notifications** — Configurable email alerts on success and/or failure
+- **Local Cleanup** — Local backup files are deleted after successful S3 upload
+- **Auto Log Clearing** — Old log records purged after 90 days via Frappe's Log Settings
+
+## Setup
+
+### 1. Enable S3 Backups
+
+In **AWS Settings**, ensure AWS and S3 are enabled, then:
+
+1. Check **Enable S3 Backups**
+2. Go to the **S3 Backups** tab
+
+### 2. Configure Backup Settings
+
+#### Backup Configuration
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| Backup Frequency | Daily | `Daily`, `Weekly`, `Monthly`, or `None` (manual only) |
+| Backup Files | On | Include public and private file tarballs in backup |
+
+#### Backup Storage
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| Backup Bucket Name | *(main bucket)* | Separate bucket for backups. Leave blank to use the main S3 bucket |
+| Backup Folder Path | *(site name)* | S3 key prefix for backup files |
+
+#### Retention
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| Keep Last N Backups | 0 (disabled) | Keep only the N most recent successful backups on S3, delete older ones |
+| Delete Backups Older Than (days) | 0 (disabled) | Delete backups older than N days from S3 |
+
+Either or both retention policies can be active. Set to `0` to disable. Retention runs after every successful backup.
+
+#### Notifications
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| Notify Email | *(required)* | Email address to receive backup notifications |
+| Send Email for Successful Backup | Off | Send notification even on success (failures always notify) |
+
+### 3. Run Migration
+
+```bash
+bench --site <site> migrate
+bench --site <site> clear-cache
+```
+
+This creates the `S3 Backup Log` DocType table.
+
+## How It Works
+
+### Backup Flow
+
+1. **Trigger** — User clicks "Take Backup Now" or scheduler fires
+2. **Queue** — A `S3 Backup Log` entry is created with status `Queued`, background job is enqueued on the `long` queue
+3. **Generate** — Frappe's `new_backup()` creates the database dump (`.sql.gz`), site config (`.json`), and optionally file archives (`.tar`)
+4. **Upload** — Each file is uploaded to S3 at `{folder}/{timestamp}-{site}-{type}.{ext}`
+5. **Record** — Log entry is updated with S3 keys, file sizes, and status `Success`
+6. **Cleanup** — Local backup files are deleted, `local_cleaned` is set
+7. **Rotate** — Old backups are deleted from S3 based on retention settings
+8. **Notify** — Email notification is sent if configured
+
+### Retry Behavior
+
+If the backup or upload fails, the job retries up to 2 times automatically. After exhausting retries, the log is marked `Failed` with the traceback, and a failure notification is sent.
+
+### Retention / Rotation
+
+Runs after every successful backup. Two independent policies:
+
+- **Count-based**: Queries all `Success` logs ordered by creation, deletes everything beyond position N
+- **Age-based**: Queries `Success` logs where `completed_at` is older than the cutoff date
+
+For each old log, all S3 objects (db, config, files, private files) are deleted via `delete_objects`, then the log record is removed. The current backup is always excluded from rotation.
+
+### Scheduler Events
+
+| Event | Function | Fires |
+|-------|----------|-------|
+| `daily` | `take_backups_daily` | Every day |
+| `weekly_long` | `take_backups_weekly` | Every week |
+| `monthly_long` | `take_backups_monthly` | Every month |
+
+Each checks `enable_s3_backups` and `s3_backup_frequency` before proceeding.
+
+## S3 Backup Log
+
+One record per backup run. Read-only from the UI (Administrator can delete).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| Status | Select | `Queued` → `In Progress` → `Success` / `Failed` |
+| Started At | Datetime | When the background job started |
+| Completed At | Datetime | When the job finished (success or failure) |
+| Database File | Data | S3 key of the `.sql.gz` file |
+| Site Config File | Data | S3 key of the `.json` file |
+| Files Archive | Data | S3 key of the public files `.tar` |
+| Private Files Archive | Data | S3 key of the private files `.tar` |
+| Database Size | Int | Size in bytes |
+| Files Size | Int | Combined public + private archive size in bytes |
+| Total Size | Int | Total bytes uploaded |
+| S3 Bucket | Data | Bucket used for this backup |
+| S3 Folder | Data | Folder prefix used |
+| Local Files Cleaned | Check | Whether local files were deleted after upload |
+| Error | Long Text | Traceback on failure |
+
+Naming: `BKUP-00001`, `BKUP-00002`, ...
+
+Status colors: Queued=Blue, In Progress=Yellow, Success=Green, Failed=Red
+
+## File Structure
+
+```
+aws_integration/
+  s3/
+    backup.py          # Backup logic: take_s3_backup, _run_backup, rotation, scheduler
+    ...
+  aws_integration/
+    doctype/
+      s3_backup_log/
+        s3_backup_log.json   # DocType definition
+        s3_backup_log.py     # Controller with clear_old_logs
+```
+
+## API Reference
+
+| Endpoint | Auth | Description |
+|----------|------|-------------|
+| `aws_integration.s3.backup.take_s3_backup` | System Manager | Queue a backup job, returns `{log_name}` |
+
+## Permissions
+
+- **S3 Backup Log**: Administrator has read + delete. No other role has access.
+- **take_s3_backup API**: Restricted to System Manager via `frappe.only_for`
+- Scheduler uses an internal `_enqueue_backup()` that bypasses the role guard
+
 ## Requirements
 
 - `boto3` (already included in app dependencies)

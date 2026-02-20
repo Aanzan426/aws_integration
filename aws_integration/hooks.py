@@ -160,7 +160,20 @@ scheduler_events = {
 	],
 	"hourly": [
 		"aws_integration.s3.scheduler.upload_pending_files"
-	]
+	],
+	"daily": [
+		"aws_integration.s3.backup.take_backups_daily"
+	],
+	"weekly_long": [
+		"aws_integration.s3.backup.take_backups_weekly"
+	],
+	"monthly_long": [
+		"aws_integration.s3.backup.take_backups_monthly"
+	],
+}
+
+default_log_clearing_doctypes = {
+	"S3 Backup Log": 90,
 }
 
 doc_events = {

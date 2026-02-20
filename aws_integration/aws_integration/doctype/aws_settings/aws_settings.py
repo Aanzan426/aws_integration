@@ -62,6 +62,16 @@ class AWSSettings(Document):
                     _("Presigned URL Expiry must be between 1 and 604800 seconds (7 days)")
                 )
 
+        if self.enable_s3_backups:
+            if not self.enable_s3 or not self.enable_aws:
+                frappe.throw(_("AWS and S3 must be enabled to use S3 Backups"))
+            if self.s3_backup_notify_email and not validate_email(self.s3_backup_notify_email):
+                frappe.throw(_("Please enter a valid backup notification email address"))
+            if self.s3_backup_retention_count and self.s3_backup_retention_count < 0:
+                frappe.throw(_("Keep Last N Backups must be 0 or greater"))
+            if self.s3_backup_retention_days and self.s3_backup_retention_days < 0:
+                frappe.throw(_("Delete Backups Older Than (days) must be 0 or greater"))
+
         if self.source_email and not validate_email(self.source_email):
             frappe.throw("Please enter valid email address")
 

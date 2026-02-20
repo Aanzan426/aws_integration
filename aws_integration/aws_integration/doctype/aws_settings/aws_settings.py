@@ -51,6 +51,10 @@ class AWSSettings(Document):
                 frappe.throw(_("AWS must be enabled to use S3"))
             if not self.s3_bucket_name:
                 frappe.throw(_("S3 Bucket Name is required when S3 is enabled"))
+            if self.s3_endpoint_url:
+                if not self.s3_endpoint_url.startswith(("https://", "http://")):
+                    self.s3_endpoint_url = f"https://{self.s3_endpoint_url}"
+
             if self.s3_presigned_url_expiry and (
                 self.s3_presigned_url_expiry < 1 or self.s3_presigned_url_expiry > 604800
             ):

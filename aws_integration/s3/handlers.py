@@ -1,5 +1,5 @@
 import os
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, urlparse
 
 import frappe
 from frappe.utils import now_datetime
@@ -97,7 +97,7 @@ def _upload_single_file(file_name):
 
     new_file_url = (
         f"/api/method/aws_integration.api.s3.generate_file"
-        f"?key={quote(s3_key, safe='/')}&file_name={quote(file_doc.file_name)}"
+        f"?key={s3_key}&file_name={file_doc.file_name}"
     )
 
     frappe.db.set_value(
@@ -179,6 +179,14 @@ def on_file_delete(doc, method):
             return
 
         if not settings.delete_s3_on_trash:
+            return
+
+        # Don't delete the S3 object if other File docs still reference it
+        # (e.g. dedup-created copies sharing the same s3_key)
+        other_refs = frappe.db.count(
+            "File", {"s3_key": doc.s3_key, "is_on_s3": 1, "name": ["!=", doc.name]}
+        )
+        if other_refs:
             return
 
         from aws_integration.s3.client import S3Client

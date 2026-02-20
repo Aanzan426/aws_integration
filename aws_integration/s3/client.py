@@ -15,30 +15,30 @@ class S3Client:
         if not self.settings.enable_aws or not self.settings.enable_s3:
             frappe.throw(_("S3 is not enabled in AWS Settings"))
 
-        self.client = boto3.client(
-            "s3",
-            region_name=self.settings.s3_bucket_region or self.settings.region,
-            aws_access_key_id=self.settings.aws_access_key_id,
-            aws_secret_access_key=self.settings.get_password("aws_secret_access_key"),
-        )
+        client_kwargs = {
+            "region_name": self.settings.s3_bucket_region or self.settings.region,
+            "aws_access_key_id": self.settings.aws_access_key_id,
+            "aws_secret_access_key": self.settings.get_password("aws_secret_access_key"),
+        }
+        if self.settings.s3_endpoint_url:
+            client_kwargs["endpoint_url"] = self.settings.s3_endpoint_url
+
+        self.client = boto3.client("s3", **client_kwargs)
         self.bucket = self.settings.s3_bucket_name
         self.prefix = self.settings.s3_folder_prefix or frappe.local.site
 
     def get_s3_key(self, file_doc):
         """Generate S3 key mirroring Frappe's folder structure.
 
-        Uses the file's content_hash (first 6 chars) as a prefix for
-        uniqueness, matching Frappe's own dedup strategy. Falls back to
-        a random string if content_hash is not available.
+        Uses the plain filename by default. Only appends a content_hash
+        prefix when another file with the same name but different content
+        already exists in S3 (collision).
 
         Strips the 'Home/' prefix from the folder since it's just Frappe's root.
         Files in 'Home' go directly under {visibility}/.
 
-        Format: {private|public}/{folder}/{hash}_{file_name}
-        Examples:
-            public/{folder_name}/{hash}_{file_name}    (folder: Home/Some Folder)
-            private/Attachments/{hash}_{file_name}      (folder: Home/Attachments)
-            public/{hash}_{file_name}                   (folder: Home)
+        Format: {private|public}/{folder}/{file_name}
+        On collision: {private|public}/{folder}/{hash}_{file_name}
 
         Args:
             file_doc: Frappe File document instance
@@ -55,19 +55,34 @@ class S3Client:
         elif folder_path.startswith("Home/"):
             folder_path = folder_path[5:]  # remove "Home/"
 
-        # Use content_hash for deterministic, idempotent key generation.
-        # Falls back to File doc name hash if content_hash is missing.
-        if file_doc.content_hash:
-            hash_prefix = file_doc.content_hash[:6]
-        else:
-            hash_prefix = frappe.generate_hash(file_doc.name, 6)
-
         file_name = file_doc.file_name or os.path.basename(file_doc.file_url or "unknown")
 
         if folder_path:
-            key = f"{visibility}/{folder_path}/{hash_prefix}_{file_name}"
+            key = f"{visibility}/{folder_path}/{file_name}"
         else:
-            key = f"{visibility}/{hash_prefix}_{file_name}"
+            key = f"{visibility}/{file_name}"
+
+        # Check if another file with the same name, folder, and visibility
+        # but different content already exists on S3. If so, prefix with
+        # content_hash to avoid overwriting the S3 object.
+        existing_hash = frappe.db.get_value(
+            "File",
+            {
+                "file_name": file_doc.file_name,
+                "folder": file_doc.folder or "Home",
+                "is_private": file_doc.is_private,
+                "is_on_s3": 1,
+                "name": ["!=", file_doc.name],
+            },
+            "content_hash",
+        )
+        if existing_hash and existing_hash != file_doc.content_hash:
+            hash_prefix = (file_doc.content_hash or frappe.generate_hash(file_doc.name, 6))[:6]
+            if folder_path:
+                key = f"{visibility}/{folder_path}/{hash_prefix}_{file_name}"
+            else:
+                key = f"{visibility}/{hash_prefix}_{file_name}"
+
         return key
 
     def get_full_s3_key(self, key):

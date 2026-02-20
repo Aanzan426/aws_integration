@@ -1,5 +1,4 @@
 import os
-from urllib.parse import quote
 
 import frappe
 from frappe.utils import cint, now_datetime
@@ -104,7 +103,7 @@ def upload_pending_files():
             # Build the new file_url that proxies through the Frappe API
             new_file_url = (
                 f"/api/method/aws_integration.api.s3.generate_file"
-                f"?key={quote(s3_key, safe='/')}&file_name={quote(file_doc.file_name)}"
+                f"?key={s3_key}&file_name={file_doc.file_name}"
             )
 
             # Persist S3 metadata on the File document without touching modified timestamp
@@ -221,7 +220,7 @@ def bulk_migrate_files():
 
                 new_file_url = (
                     f"/api/method/aws_integration.api.s3.generate_file"
-                    f"?key={quote(s3_key, safe='/')}&file_name={quote(file_doc.file_name)}"
+                    f"?key={s3_key}&file_name={file_doc.file_name}"
                 )
 
                 frappe.db.set_value(

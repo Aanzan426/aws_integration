@@ -30,7 +30,7 @@ frappe.ui.form.on("AWS Settings", {
                         },
                     });
                 },
-                __("S3")
+                __("S3 Files")
             );
 
             frm.add_custom_button(
@@ -63,7 +63,7 @@ frappe.ui.form.on("AWS Settings", {
                         }
                     );
                 },
-                __("S3")
+                __("S3 Files")
             );
 
             frm.add_custom_button(
@@ -82,29 +82,42 @@ frappe.ui.form.on("AWS Settings", {
                                 let i = Math.floor(Math.log(bytes) / Math.log(1024));
                                 return (bytes / Math.pow(1024, i)).toFixed(1) + " " + units[i];
                             };
-                            let pct = d.total_files
-                                ? ((d.on_s3 / d.total_files) * 100).toFixed(1)
+                            let esc = frappe.utils.xss_sanitise;
+                            let s_on_s3 = cint(d.on_s3);
+                            let s_pending = cint(d.pending);
+                            let s_exempt = cint(d.exempt);
+                            let s_total = cint(d.total_files);
+                            let s_errors = cint(d.recent_errors);
+                            let pct = s_total
+                                ? ((s_on_s3 / s_total) * 100).toFixed(1)
                                 : 0;
+
+                            let last_upload_str = "";
+                            if (d.last_uploaded_at) {
+                                last_upload_str = __("Last upload: {0}", [esc(frappe.datetime.prettyDate(d.last_uploaded_at))]);
+                            } else {
+                                last_upload_str = __("No files uploaded yet");
+                            }
 
                             let html = `
                                 <div class="s3-status-grid" style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
                                     <div class="s3-stat" style="padding:12px; border-radius:8px; background:var(--bg-light-gray);">
                                         <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase;">${__("On S3")}</div>
-                                        <div style="font-size:22px; font-weight:600; color:var(--text-color);">${d.on_s3}</div>
+                                        <div style="font-size:22px; font-weight:600; color:var(--text-color);">${s_on_s3}</div>
                                         <div style="font-size:12px; color:var(--text-muted);">${fmt_size(d.s3_size)}</div>
                                     </div>
                                     <div class="s3-stat" style="padding:12px; border-radius:8px; background:var(--bg-light-gray);">
                                         <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase;">${__("Pending Upload")}</div>
-                                        <div style="font-size:22px; font-weight:600; color:${d.pending ? 'var(--orange-500)' : 'var(--text-color)'};">${d.pending}</div>
+                                        <div style="font-size:22px; font-weight:600; color:${s_pending ? 'var(--orange-500)' : 'var(--text-color)'};">${s_pending}</div>
                                         <div style="font-size:12px; color:var(--text-muted);">${fmt_size(d.pending_size)}</div>
                                     </div>
                                     <div class="s3-stat" style="padding:12px; border-radius:8px; background:var(--bg-light-gray);">
                                         <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase;">${__("Exempt Files")}</div>
-                                        <div style="font-size:22px; font-weight:600; color:var(--text-color);">${d.exempt}</div>
+                                        <div style="font-size:22px; font-weight:600; color:var(--text-color);">${s_exempt}</div>
                                     </div>
                                     <div class="s3-stat" style="padding:12px; border-radius:8px; background:var(--bg-light-gray);">
                                         <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase;">${__("Total Files")}</div>
-                                        <div style="font-size:22px; font-weight:600; color:var(--text-color);">${d.total_files}</div>
+                                        <div style="font-size:22px; font-weight:600; color:var(--text-color);">${s_total}</div>
                                     </div>
                                 </div>
                                 <div style="margin-top:16px;">
@@ -117,11 +130,9 @@ frappe.ui.form.on("AWS Settings", {
                                     </div>
                                 </div>
                                 <div style="margin-top:12px; font-size:12px; color:var(--text-muted);">
-                                    ${d.last_uploaded_at
-                                        ? __("Last upload: {0}", [frappe.datetime.prettyDate(d.last_uploaded_at)])
-                                        : __("No files uploaded yet")}
-                                    ${d.recent_errors
-                                        ? ' &middot; <span style="color:var(--red-500);">' + __("{0} errors in last 7 days", [d.recent_errors]) + '</span>'
+                                    ${last_upload_str}
+                                    ${s_errors
+                                        ? ' &middot; <span style="color:var(--red-500);">' + __("{0} errors in last 7 days", [s_errors]) + '</span>'
                                         : ''}
                                 </div>
                             `;
@@ -135,7 +146,7 @@ frappe.ui.form.on("AWS Settings", {
                         },
                     });
                 },
-                __("S3")
+                __("S3 Files")
             );
 
             frm.add_custom_button(
@@ -166,7 +177,7 @@ frappe.ui.form.on("AWS Settings", {
                         }
                     );
                 },
-                __("S3")
+                __("S3 Files")
             );
 
         }
@@ -181,10 +192,11 @@ frappe.ui.form.on("AWS Settings", {
                         freeze_message: __("Queuing S3 Backup..."),
                         callback: function (r) {
                             if (r.message && r.message.log_name) {
-                                frappe.msgprint({
-                                    title: __("Backup Queued"),
-                                    indicator: "blue",
-                                    message: __("Backup job {0} has been queued. Track progress below.", [r.message.log_name]),
+                                frm._s3_active_stage = "queued";
+                                frm._s3_active_log = r.message.log_name;
+                                render_backup_status_card(frm, {
+                                    name: r.message.log_name,
+                                    status: "Queued",
                                 });
                             }
                         },
@@ -197,7 +209,34 @@ frappe.ui.form.on("AWS Settings", {
                         },
                     });
                 },
-                __("S3")
+                __("S3 Backups")
+            );
+
+            frm.add_custom_button(
+                __("Upload Local Backups"),
+                function () {
+                    frappe.confirm(
+                        __("This will scan for existing local backups and upload them to S3. Continue?"),
+                        function () {
+                            frappe.call({
+                                method: "aws_integration.s3.backup.upload_local_backups",
+                                freeze: true,
+                                freeze_message: __("Scanning local backups..."),
+                                callback: function (r) {
+                                    if (r.message) {
+                                        frappe.msgprint({
+                                            title: __("Local Backups Queued"),
+                                            indicator: "blue",
+                                            message: __("{0} backup(s) queued for upload.", [r.message.count]),
+                                        });
+                                        fetch_and_render_backup_card(frm);
+                                    }
+                                },
+                            });
+                        }
+                    );
+                },
+                __("S3 Backups")
             );
 
             frm.add_custom_button(
@@ -205,13 +244,14 @@ frappe.ui.form.on("AWS Settings", {
                 function () {
                     frappe.set_route("List", "S3 Backup Log");
                 },
-                __("S3")
+                __("S3 Backups")
             );
+
+            // Render initial status card from latest backup log
+            fetch_and_render_backup_card(frm);
         }
 
         if (frm.doc.enable_aws && frm.doc.enable_s3) {
-            // Listen for migration progress updates from the background job.
-            // Use .off() first to prevent duplicate listeners on form refresh.
             frappe.realtime.off("s3_migration_progress");
             frappe.realtime.on("s3_migration_progress", function (data) {
                 frappe.show_progress(
@@ -257,39 +297,283 @@ frappe.ui.form.on("AWS Settings", {
             frappe.realtime.off("s3_backup_progress");
             frappe.realtime.on("s3_backup_progress", function (data) {
                 if (data.status === "generating") {
-                    frappe.show_progress(
-                        __("S3 Backup"),
-                        33, 100,
-                        __("Generating backup files...")
-                    );
+                    frm._s3_active_stage = "generating";
+                    update_stage_pipeline(frm, "generating");
                 } else if (data.status === "uploading") {
-                    frappe.show_progress(
-                        __("S3 Backup"),
-                        66, 100,
-                        __("Uploading to S3...")
-                    );
-                } else if (data.status === "success") {
-                    frappe.hide_progress();
-                    let safe_name = frappe.utils.xss_sanitise(data.log_name || "");
-                    frappe.msgprint({
-                        title: __("Backup Complete"),
-                        indicator: "green",
-                        message: __("S3 backup completed successfully. View {0}.", [
-                            '<a href="/app/s3-backup-log/' + encodeURIComponent(safe_name) + '">' + safe_name + '</a>'
-                        ]),
-                    });
-                } else if (data.status === "failed") {
-                    frappe.hide_progress();
-                    let safe_fail_name = frappe.utils.xss_sanitise(data.log_name || "");
-                    frappe.msgprint({
-                        title: __("Backup Failed"),
-                        indicator: "red",
-                        message: __("S3 backup failed. Check {0} for details.", [
-                            '<a href="/app/s3-backup-log/' + encodeURIComponent(safe_fail_name) + '">' + safe_fail_name + '</a>'
-                        ]),
-                    });
+                    frm._s3_active_stage = "uploading";
+                    update_stage_pipeline(frm, "uploading");
+                } else if (data.status === "success" || data.status === "failed") {
+                    frm._s3_active_stage = null;
+                    frm._s3_active_log = null;
+                    fetch_and_render_backup_card(frm);
                 }
             });
         }
     },
 });
+
+// ── Backup Status Card helpers ──
+
+const STAGES = ["queued", "generating", "uploading", "done"];
+
+const STAGE_LABELS = {
+    queued: __("Queued"),
+    generating: __("Generating"),
+    uploading: __("Uploading"),
+    done: __("Done"),
+};
+
+function fmt_size(bytes) {
+    if (!bytes) return "0 B";
+    let units = ["B", "KB", "MB", "GB", "TB"];
+    let i = Math.floor(Math.log(bytes) / Math.log(1024));
+    return (bytes / Math.pow(1024, i)).toFixed(1) + " " + units[i];
+}
+
+function map_log_status_to_stage(status) {
+    switch (status) {
+        case "Queued": return "queued";
+        case "Generating": return "generating";
+        case "Uploading": return "uploading";
+        case "Success": return "done";
+        case "Failed": return "failed";
+        default: return null;
+    }
+}
+
+function fetch_and_render_backup_card(frm) {
+    frappe.call({
+        method: "frappe.client.get_list",
+        args: {
+            doctype: "S3 Backup Log",
+            fields: [
+                "name", "status", "started_at", "completed_at",
+                "total_size", "db_size", "files_size", "s3_bucket", "creation",
+            ],
+            order_by: "creation desc",
+            limit_page_length: 1,
+        },
+        async: true,
+        callback: function (r) {
+            if (r.message && r.message.length) {
+                let log = r.message[0];
+                let stage = map_log_status_to_stage(log.status);
+                // If a backup is in progress, the realtime events will
+                // have set _s3_active_stage more precisely
+                if ((log.status === "Generating" || log.status === "Uploading") && frm._s3_active_stage) {
+                    stage = frm._s3_active_stage;
+                }
+                render_backup_status_card(frm, log, stage);
+            } else {
+                render_empty_backup_card(frm);
+            }
+        },
+    });
+}
+
+function render_empty_backup_card(frm) {
+    let wrapper = frm.fields_dict.s3_backup_status_html;
+    if (!wrapper) return;
+    wrapper.$wrapper.html(`
+        <div class="s3-backup-card" style="
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 24px;
+            margin-bottom: 16px;
+            text-align: center;
+            color: var(--text-muted);
+        ">
+            <div style="font-size: 14px;">${__("No backups yet")}</div>
+            <div style="font-size: 12px; margin-top: 4px;">
+                ${__('Click "Take Backup Now" to create your first S3 backup.')}
+            </div>
+        </div>
+    `);
+}
+
+function render_backup_status_card(frm, log, stage) {
+    let wrapper = frm.fields_dict.s3_backup_status_html;
+    if (!wrapper) return;
+
+    let is_failed = log.status === "Failed";
+    if (!stage) stage = map_log_status_to_stage(log.status);
+
+    let pipeline_html = build_stage_pipeline(stage, is_failed);
+    let summary_html = build_summary(log);
+
+    wrapper.$wrapper.html(`
+        <div class="s3-backup-card" style="
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            overflow: hidden;
+            margin-bottom: 16px;
+        ">
+            <div class="s3-backup-pipeline" style="padding: 16px 20px; background: var(--fg-color);">
+                ${pipeline_html}
+            </div>
+            <div class="s3-backup-summary" style="
+                padding: 12px 20px;
+                border-top: 1px solid var(--border-color);
+                font-size: 13px;
+                color: var(--text-color);
+                background: var(--fg-color);
+            ">
+                ${summary_html}
+            </div>
+        </div>
+        <style>
+            @keyframes s3-pulse {
+                0%, 100% { opacity: 1; }
+                50% { opacity: 0.4; }
+            }
+            .s3-stage-active .s3-stage-dot {
+                animation: s3-pulse 1.5s ease-in-out infinite;
+            }
+        </style>
+    `);
+}
+
+function build_stage_pipeline(active_stage, is_failed) {
+    let active_idx = STAGES.indexOf(active_stage);
+    // For "failed", mark up to the last reached stage
+    let failed_stage = null;
+    if (is_failed) {
+        // If active_stage is "failed" (not in STAGES), determine from context
+        if (active_idx === -1) {
+            // Unknown stage — mark the first stage as failed
+            active_idx = 0;
+        }
+        failed_stage = active_idx;
+    }
+
+    let items = STAGES.map(function (stage, idx) {
+        let dot_style, label_style, css_class;
+
+        if (is_failed && idx === failed_stage) {
+            // Failed at this stage
+            dot_style = "background: var(--red-500); border-color: var(--red-500);";
+            label_style = "color: var(--red-500); font-weight: 600;";
+            css_class = "";
+        } else if (is_failed && idx < failed_stage) {
+            // Completed before failure
+            dot_style = "background: var(--green-500); border-color: var(--green-500);";
+            label_style = "color: var(--green-500);";
+            css_class = "";
+        } else if (!is_failed && active_idx >= 0 && idx < active_idx) {
+            // Completed stage
+            dot_style = "background: var(--green-500); border-color: var(--green-500);";
+            label_style = "color: var(--green-500);";
+            css_class = "";
+        } else if (!is_failed && idx === active_idx) {
+            // Active/in-progress stage
+            if (stage === "done") {
+                // Done = fully completed
+                dot_style = "background: var(--green-500); border-color: var(--green-500);";
+                label_style = "color: var(--green-500); font-weight: 600;";
+                css_class = "";
+            } else {
+                dot_style = "background: var(--yellow-500); border-color: var(--yellow-500);";
+                label_style = "color: var(--yellow-500); font-weight: 600;";
+                css_class = "s3-stage-active";
+            }
+        } else {
+            // Pending
+            dot_style = "background: transparent; border-color: var(--gray-400);";
+            label_style = "color: var(--gray-400);";
+            css_class = "";
+        }
+
+        return `<div class="s3-stage-item ${css_class}" style="display: flex; align-items: center; gap: 6px;">
+            <span class="s3-stage-dot" style="
+                display: inline-block;
+                width: 12px; height: 12px;
+                border-radius: 50%;
+                border: 2px solid;
+                ${dot_style}
+                flex-shrink: 0;
+            "></span>
+            <span style="font-size: 12px; white-space: nowrap; ${label_style}">${STAGE_LABELS[stage]}</span>
+        </div>`;
+    });
+
+    let connector = `<div style="flex: 1; height: 2px; background: var(--border-color); margin: 0 4px;"></div>`;
+    return `<div style="display: flex; align-items: center;">${items.join(connector)}</div>`;
+}
+
+function build_summary(log) {
+    let safe_name = frappe.utils.xss_sanitise(log.name || "");
+    let link = `<a href="/app/s3-backup-log/${encodeURIComponent(safe_name)}">${safe_name}</a>`;
+
+    let badge = "";
+    switch (log.status) {
+        case "Success":
+            badge = `<span style="
+                display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; font-weight: 600;
+                background: var(--green-100); color: var(--green-700);
+            ">${__("Success")}</span>`;
+            break;
+        case "Failed":
+            badge = `<span style="
+                display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; font-weight: 600;
+                background: var(--red-100); color: var(--red-700);
+            ">${__("Failed")}</span>`;
+            break;
+        case "Generating":
+            badge = `<span style="
+                display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; font-weight: 600;
+                background: var(--yellow-100); color: var(--yellow-700);
+            ">${__("Generating")}</span>`;
+            break;
+        case "Uploading":
+            badge = `<span style="
+                display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; font-weight: 600;
+                background: var(--orange-100); color: var(--orange-700);
+            ">${__("Uploading")}</span>`;
+            break;
+        case "Queued":
+            badge = `<span style="
+                display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; font-weight: 600;
+                background: var(--blue-100); color: var(--blue-700);
+            ">${__("Queued")}</span>`;
+            break;
+    }
+
+    let size_str = log.total_size ? fmt_size(log.total_size) : "";
+    let time_str = "";
+    let ref_time = log.completed_at || log.started_at || log.creation;
+    if (ref_time) {
+        time_str = frappe.datetime.prettyDate(ref_time);
+    }
+
+    let top_line = [link, badge, size_str, time_str]
+        .filter(Boolean)
+        .join(" &nbsp;&middot;&nbsp; ");
+
+    let details = [];
+    if (log.db_size) details.push(__("DB: {0}", [fmt_size(log.db_size)]));
+    if (log.files_size) details.push(__("Files: {0}", [fmt_size(log.files_size)]));
+    if (log.s3_bucket) details.push(__("Bucket: {0}", [frappe.utils.xss_sanitise(log.s3_bucket)]));
+
+    let bottom_line = details.length
+        ? `<div style="font-size: 12px; color: var(--text-muted); margin-top: 4px;">${details.join(" &nbsp;&middot;&nbsp; ")}</div>`
+        : "";
+
+    return `<div>${top_line}</div>${bottom_line}`;
+}
+
+function update_stage_pipeline(frm, stage) {
+    let wrapper = frm.fields_dict.s3_backup_status_html;
+    if (!wrapper) return;
+
+    let pipeline_el = wrapper.$wrapper.find(".s3-backup-pipeline");
+    if (!pipeline_el.length) {
+        // Card hasn't been rendered yet — render a minimal one
+        render_backup_status_card(frm, {
+            name: frm._s3_active_log || "",
+            status: "In Progress",
+        }, stage);
+        return;
+    }
+
+    pipeline_el.html(build_stage_pipeline(stage, false));
+}

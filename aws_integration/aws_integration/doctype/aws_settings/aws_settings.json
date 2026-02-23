@@ -38,6 +38,7 @@
   "exempt_doctypes_section",
   "exempt_doctypes",
   "tab_break_s3_backups",
+  "s3_backup_status_html",
   "s3_backup_config_section",
   "s3_backup_frequency",
   "column_break_s3_backup_1",
@@ -246,6 +247,12 @@
   },
   {
    "depends_on": "enable_s3_backups",
+   "fieldname": "s3_backup_status_html",
+   "fieldtype": "HTML",
+   "label": "Backup Status"
+  },
+  {
+   "depends_on": "enable_s3_backups",
    "fieldname": "s3_backup_config_section",
    "fieldtype": "Section Break",
    "label": "Backup Configuration"
@@ -355,7 +362,7 @@
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2026-02-20 17:34:17.952418",
+ "modified": "2026-02-23 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "Aws Integration",
  "name": "AWS Settings",

@@ -1,13 +1,22 @@
 # Copyright (c) 2026, Hybrowlabs Technologies and contributors
 # For license information, please see license.txt
 
+import secrets
+
 import frappe
 from frappe.model.document import Document
 from frappe.query_builder import Interval
 from frappe.query_builder.functions import Now
+from frappe.utils import now_datetime
 
 
 class S3BackupLog(Document):
+
+	def autoname(self):
+		base = now_datetime().strftime("BKUP-%Y%m%d-%H%M%S")
+		if frappe.db.exists("S3 Backup Log", base):
+			base = f"{base}-{secrets.token_hex(2)}"
+		self.name = base
 
 	@staticmethod
 	def clear_old_logs(days=90):

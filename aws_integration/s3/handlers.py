@@ -4,7 +4,6 @@ from urllib.parse import parse_qs, urlparse
 import frappe
 from frappe.utils import now_datetime
 
-
 S3_API_PREFIX = "/api/method/aws_integration.api.s3.generate_file"
 
 
@@ -49,8 +48,10 @@ def on_file_upload(doc, method):
             file_name=doc.name,
         )
     except Exception:
-        # Don't block file creation if S3 check fails
-        pass
+        frappe.log_error(
+            title="S3 Upload Enqueue Failed",
+            message=f"Failed to enqueue S3 upload for {doc.name}: {frappe.get_traceback()}",
+        )
 
 
 def _upload_single_file(file_name):
@@ -118,6 +119,8 @@ def _upload_single_file(file_name):
 
     if settings.delete_local_after_upload and os.path.exists(file_path):
         os.remove(file_path)
+        frappe.db.set_value("File", file_doc.name, "local_deleted", 1, update_modified=False)
+        frappe.db.commit()
 
     # Notify the browser so the File form auto-refreshes with the S3 indicator
     frappe.publish_realtime("s3_upload_complete", {"file_name": file_doc.name})

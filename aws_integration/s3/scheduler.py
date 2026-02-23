@@ -126,6 +126,8 @@ def upload_pending_files():
             # Optionally remove the local copy after a successful upload
             if settings.delete_local_after_upload and os.path.exists(file_path):
                 os.remove(file_path)
+                frappe.db.set_value("File", file_doc.name, "local_deleted", 1, update_modified=False)
+                frappe.db.commit()
 
             uploaded_count += 1
 
@@ -195,6 +197,16 @@ def bulk_migrate_files():
         for file_data in files:
             try:
                 file_doc = frappe.get_doc("File", file_data.name)
+
+                # Acquire a row-level lock to prevent a concurrent instant-upload
+                # worker from uploading the same file at the same time.
+                lock_result = frappe.db.sql(
+                    "SELECT name FROM `tabFile` WHERE name=%s AND is_on_s3=0 FOR UPDATE",
+                    file_doc.name,
+                )
+                if not lock_result:
+                    continue
+
                 file_path = file_doc.get_full_path()
 
                 if not os.path.exists(file_path):
@@ -205,15 +217,6 @@ def bulk_migrate_files():
                         message=f"Local file not found for {file_doc.name}: {file_path}",
                     )
                     total_failed += 1
-                    continue
-
-                # Acquire a row-level lock to prevent a concurrent instant-upload
-                # worker from uploading the same file at the same time.
-                lock_result = frappe.db.sql(
-                    "SELECT name FROM `tabFile` WHERE name=%s AND is_on_s3=0 FOR UPDATE",
-                    file_doc.name,
-                )
-                if not lock_result:
                     continue
 
                 s3_key = s3_client.upload_file(file_doc)
@@ -241,6 +244,8 @@ def bulk_migrate_files():
 
                 if settings.delete_local_after_upload and os.path.exists(file_path):
                     os.remove(file_path)
+                    frappe.db.set_value("File", file_doc.name, "local_deleted", 1, update_modified=False)
+                    frappe.db.commit()
 
                 total_uploaded += 1
 
@@ -269,8 +274,8 @@ def bulk_migrate_files():
 def cleanup_local_s3_files():
     """Background job: Delete local copies of files already uploaded to S3.
 
-    Queries files where is_on_s3=1, checks if a local copy still exists
-    on disk, and deletes it. Publishes realtime progress events.
+    Queries files where is_on_s3=1 and local_deleted=0, checks if a local
+    copy still exists on disk, and deletes it. Publishes realtime progress events.
     """
     settings = frappe.get_cached_doc("AWS Settings")
     if not settings.enable_aws or not settings.enable_s3:
@@ -281,16 +286,17 @@ def cleanup_local_s3_files():
     total_skipped = 0
     total_missing = 0
 
-    total_on_s3 = frappe.db.count("File", {"is_folder": 0, "is_on_s3": 1})
-    if not total_on_s3:
+    cleanup_filters = {"is_folder": 0, "is_on_s3": 1, "local_deleted": 0}
+    total_pending = frappe.db.count("File", cleanup_filters)
+    if not total_pending:
         return
 
-    max_batches = (total_on_s3 // batch_size) + 2
+    max_batches = (total_pending // batch_size) + 2
 
     for _ in range(max_batches):
         files = frappe.get_all(
             "File",
-            filters={"is_folder": 0, "is_on_s3": 1},
+            filters=cleanup_filters,
             fields=["name", "file_name", "file_url", "is_private"],
             limit_page_length=batch_size,
             order_by="creation asc",
@@ -308,11 +314,29 @@ def cleanup_local_s3_files():
                     file_data.file_name,
                 )
 
-                if os.path.exists(site_path):
-                    os.remove(site_path)
+                # Validate resolved path stays within the expected directory
+                real_path = os.path.realpath(site_path)
+                expected_base = os.path.realpath(
+                    frappe.get_site_path(
+                        "private" if file_data.is_private else "public", "files"
+                    )
+                )
+                if not real_path.startswith(expected_base + os.sep):
+                    frappe.log_error(
+                        title="S3 Cleanup: Path Traversal Blocked",
+                        message=f"Blocked deletion of {site_path} for {file_data.name}",
+                    )
+                    total_skipped += 1
+                    continue
+
+                if os.path.exists(real_path):
+                    os.remove(real_path)
                     total_deleted += 1
                 else:
                     total_missing += 1
+
+                # Mark as locally deleted whether the file existed or was already gone
+                frappe.db.set_value("File", file_data.name, "local_deleted", 1, update_modified=False)
 
             except Exception as e:
                 total_skipped += 1
@@ -321,18 +345,19 @@ def cleanup_local_s3_files():
                     message=f"Failed to clean up {file_data.name}: {str(e)}",
                 )
 
+        # Commit after each batch so progress is not lost on crash
+        frappe.db.commit()
+
         frappe.publish_realtime(
             "s3_cleanup_progress",
             {
                 "deleted": total_deleted,
                 "missing": total_missing,
                 "skipped": total_skipped,
-                "total": total_on_s3,
+                "total": total_pending,
             },
         )
 
-        # All files in this batch are on S3 — the result set is static.
-        # Since we process every row, break if this was a partial batch.
         if len(files) < batch_size:
             break
 

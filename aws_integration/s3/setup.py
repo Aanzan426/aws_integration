@@ -38,6 +38,15 @@ def after_migrate():
                 "read_only": 1,
                 "no_copy": 1,
             },
+            {
+                "fieldname": "local_deleted",
+                "fieldtype": "Check",
+                "label": "Local File Deleted",
+                "insert_after": "s3_uploaded_at",
+                "read_only": 1,
+                "default": "0",
+                "no_copy": 1,
+            },
         ]
     }
     create_custom_fields(custom_fields, update=True)

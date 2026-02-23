@@ -2,8 +2,11 @@ frappe.ui.form.on("File", {
     refresh: function (frm) {
         if (frm.doc.is_on_s3 && frm.doc.s3_key) {
             // Add S3 indicator
+            let label = frm.doc.local_deleted
+                ? __("Stored on S3 (local deleted)")
+                : __("Stored on S3");
             frm.dashboard.set_headline(
-                `<span class="indicator-pill green">${__("Stored on S3")}</span>`
+                `<span class="indicator-pill green">${label}</span>`
             );
         } else if (!frm.doc.is_on_s3 && frm.doc.file_url && frm.doc.file_url.startsWith("/")) {
             frm.add_custom_button(__("Upload to S3"), function () {

@@ -1,6 +1,6 @@
 {
  "actions": [],
- "autoname": "BKUP-.#####",
+ "autoname": "",
  "creation": "2026-02-20 00:00:00.000000",
  "doctype": "DocType",
  "engine": "InnoDB",
@@ -25,6 +25,7 @@
   "s3_folder",
   "column_break_storage_1",
   "local_cleaned",
+  "local_backup_paths",
   "error_section",
   "error"
  ],
@@ -34,7 +35,7 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Status",
-   "options": "Queued\nIn Progress\nSuccess\nFailed",
+   "options": "Queued\nGenerating\nUploading\nSuccess\nFailed",
    "default": "Queued",
    "read_only": 1
   },
@@ -143,6 +144,13 @@
    "read_only": 1
   },
   {
+   "fieldname": "local_backup_paths",
+   "fieldtype": "Small Text",
+   "hidden": 1,
+   "label": "Local Backup Paths",
+   "read_only": 1
+  },
+  {
    "collapsible": 1,
    "fieldname": "error_section",
    "fieldtype": "Section Break",
@@ -157,7 +165,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-02-20 00:00:00.000000",
+ "modified": "2026-02-23 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "Aws Integration",
  "name": "S3 Backup Log",
@@ -178,7 +186,11 @@
   },
   {
    "color": "Yellow",
-   "title": "In Progress"
+   "title": "Generating"
+  },
+  {
+   "color": "Orange",
+   "title": "Uploading"
   },
   {
    "color": "Green",

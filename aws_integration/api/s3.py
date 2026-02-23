@@ -125,6 +125,7 @@ def migrate_files_to_s3():
         "is_folder": 0,
         "file_url": ("like", "/%"),
         "is_on_s3": 0,
+        "s3_upload_skipped": 0,
     }
     if exempt_doctypes:
         pending_filters["attached_to_doctype"] = ("not in", exempt_doctypes)
@@ -180,11 +181,12 @@ def get_s3_status():
         "SELECT COALESCE(SUM(file_size), 0) FROM `tabFile` WHERE is_folder=0 AND is_on_s3=1"
     )[0][0]
 
-    # Pending local files (not on S3, local URL)
+    # Pending local files (not on S3, local URL, not skipped)
     pending_filters = {
         "is_folder": 0,
         "file_url": ("like", "/%"),
         "is_on_s3": 0,
+        "s3_upload_skipped": 0,
     }
     if exempt_doctypes:
         pending_filters["attached_to_doctype"] = ("not in", exempt_doctypes)
@@ -193,7 +195,7 @@ def get_s3_status():
 
     pending_size = frappe.db.sql(
         """SELECT COALESCE(SUM(file_size), 0) FROM `tabFile`
-        WHERE is_folder=0 AND file_url LIKE '/%%' AND is_on_s3=0
+        WHERE is_folder=0 AND file_url LIKE '/%%' AND is_on_s3=0 AND s3_upload_skipped=0
         {exempt_clause}""".format(
             exempt_clause=(
                 "AND (attached_to_doctype IS NULL OR attached_to_doctype NOT IN ({}))".format(
@@ -227,18 +229,15 @@ def get_s3_status():
         "SELECT MAX(s3_uploaded_at) FROM `tabFile` WHERE is_on_s3=1"
     )[0][0]
 
-    # Recent S3 errors from Error Log (last 7 days), split by type
+    # Count files skipped during migration (file not found on disk)
+    recent_skipped = frappe.db.count("File", {"is_folder": 0, "s3_upload_skipped": 1})
+
+    # Recent S3 errors from Error Log (last 7 days)
     cutoff = frappe.utils.add_days(frappe.utils.nowdate(), -7)
-    error_counts = frappe.db.sql(
-        """SELECT
-            SUM(CASE WHEN method = 'S3 Upload Skipped' THEN 1 ELSE 0 END) AS skipped,
-            SUM(CASE WHEN method != 'S3 Upload Skipped' THEN 1 ELSE 0 END) AS errors
-        FROM `tabError Log`
-        WHERE creation >= %s AND method LIKE '%%s3%%'""",
-        cutoff,
-    )[0]
-    recent_errors = int(error_counts[1] or 0)
-    recent_skipped = int(error_counts[0] or 0)
+    recent_errors = frappe.db.count("Error Log", {
+        "creation": (">=", cutoff),
+        "method": ("like", "%s3%"),
+    })
 
     return {
         "on_s3": on_s3,

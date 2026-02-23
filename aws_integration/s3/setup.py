@@ -47,6 +47,15 @@ def after_migrate():
                 "default": "0",
                 "no_copy": 1,
             },
+            {
+                "fieldname": "s3_upload_skipped",
+                "fieldtype": "Check",
+                "label": "S3 Upload Skipped (File Missing)",
+                "insert_after": "local_deleted",
+                "read_only": 1,
+                "default": "0",
+                "no_copy": 1,
+            },
         ]
     }
     create_custom_fields(custom_fields, update=True)

@@ -29,6 +29,7 @@ def upload_pending_files():
         "is_folder": 0,
         "file_url": ("like", "/%"),
         "is_on_s3": 0,
+        "s3_upload_skipped": 0,
     }
 
     files = frappe.get_all(
@@ -91,10 +92,8 @@ def upload_pending_files():
             # Resolve the absolute path on disk
             file_path = file_doc.get_full_path()
             if not os.path.exists(file_path):
-                frappe.log_error(
-                    title="S3 Upload Skipped",
-                    message=f"File not found on disk: {file_data.name} ({file_path})",
-                )
+                frappe.db.set_value("File", file_data.name, "s3_upload_skipped", 1, update_modified=False)
+                frappe.db.commit()
                 continue
 
             # Upload to S3 and receive the object key
@@ -147,128 +146,152 @@ def upload_pending_files():
 
 
 def bulk_migrate_files():
-    """Background job: Migrate all local files to S3.
-
-    Fetches the total count of pending files upfront, then processes them
-    in fixed-size batches with a bounded loop. Progress events are broadcast
-    via Frappe's realtime channel for the browser UI.
-    """
+    """Coordinator: fan out file migration into parallel batch jobs."""
     settings = frappe.get_cached_doc("AWS Settings")
     if not settings.enable_aws or not settings.enable_s3:
         return
 
+    # Prevent duplicate migrations from overlapping clicks
+    lock_key = "s3_bulk_migration_running"
+    if frappe.cache.get_value(lock_key):
+        return
+    frappe.cache.set_value(lock_key, 1, expires_in_sec=3600)
+
     exempt_doctypes = list({d.exempt_doctype for d in settings.exempt_doctypes})
     batch_size = cint(settings.s3_batch_size) or 50
 
+    filters = _get_pending_filters(exempt_doctypes)
+    pending_files = frappe.get_all(
+        "File", filters=filters, fields=["name"], order_by="creation asc",
+        limit_page_length=0,
+    )
+
+    if not pending_files:
+        frappe.cache.delete_value(lock_key)
+        return
+
+    total = len(pending_files)
+    chunks = []
+    for i in range(0, total, batch_size):
+        chunks.append([f.name for f in pending_files[i:i + batch_size]])
+
+    migration_id = frappe.generate_hash(length=10)
+
+    # Store total_batches in a Redis hash for atomic progress tracking.
+    # TTL ensures cleanup if all workers crash/timeout.
+    cache_key = _migration_cache_key(migration_id)
+    frappe.cache.hset(cache_key, mapping={
+        "total_batches": len(chunks),
+        "completed_batches": 0,
+        "uploaded": 0,
+        "failed": 0,
+    })
+    frappe.cache.expire(cache_key, 3600)
+
+    for chunk in chunks:
+        frappe.enqueue(
+            _migrate_file_batch,
+            queue="short",
+            timeout=600,
+            file_names=chunk,
+            migration_id=migration_id,
+            total=total,
+        )
+
+
+def _migrate_file_batch(file_names, migration_id, total):
+    """Worker: upload a batch of files to S3."""
+    settings = frappe.get_cached_doc("AWS Settings")
     from aws_integration.s3.client import S3Client
 
     try:
         s3_client = S3Client()
     except Exception as e:
-        frappe.log_error(
-            title="S3 Migration Error",
-            message=f"Failed to initialize S3 client: {str(e)}\n{frappe.get_traceback()}",
-        )
+        frappe.log_error(title="S3 Migration Error", message=f"Failed to init S3 client: {e}")
+        _update_migration_progress(migration_id, 0, len(file_names), total)
         return
 
-    # Count total pending files upfront to bound the loop
-    filters = _get_pending_filters(exempt_doctypes)
-    total_pending = frappe.db.count("File", filters)
+    uploaded = 0
+    failed = 0
 
-    if not total_pending:
-        return
+    for file_name in file_names:
+        try:
+            file_doc = frappe.get_doc("File", file_name)
 
-    max_batches = (total_pending // batch_size) + 2  # small margin for safety
-    total_uploaded = 0
-    total_failed = 0
+            lock_result = frappe.db.sql(
+                "SELECT name FROM `tabFile` WHERE name=%s AND is_on_s3=0 FOR UPDATE",
+                file_doc.name,
+            )
+            if not lock_result:
+                continue
 
-    for _ in range(max_batches):
-        files = frappe.get_all(
-            "File",
-            filters=_get_pending_filters(exempt_doctypes),
-            fields=["name", "file_name", "file_url", "is_private", "attached_to_doctype"],
-            limit_page_length=batch_size,
-            order_by="creation asc",
-        )
+            file_path = file_doc.get_full_path()
 
-        if not files:
-            break
+            if not os.path.exists(file_path):
+                frappe.db.set_value("File", file_name, "s3_upload_skipped", 1, update_modified=False)
+                frappe.db.commit()
+                failed += 1
+                continue
 
-        for file_data in files:
-            try:
-                file_doc = frappe.get_doc("File", file_data.name)
+            s3_key = s3_client.upload_file(file_doc)
+            new_file_url = (
+                f"/api/method/aws_integration.api.s3.generate_file"
+                f"?key={s3_key}&file_name={file_doc.file_name}"
+            )
 
-                # Acquire a row-level lock to prevent a concurrent instant-upload
-                # worker from uploading the same file at the same time.
-                lock_result = frappe.db.sql(
-                    "SELECT name FROM `tabFile` WHERE name=%s AND is_on_s3=0 FOR UPDATE",
-                    file_doc.name,
-                )
-                if not lock_result:
-                    continue
+            frappe.db.set_value("File", file_doc.name, {
+                "file_url": new_file_url,
+                "s3_key": s3_key,
+                "is_on_s3": 1,
+                "s3_uploaded_at": now_datetime(),
+            }, update_modified=False)
+            frappe.db.commit()
 
-                file_path = file_doc.get_full_path()
-
-                if not os.path.exists(file_path):
-                    # Log and skip — do NOT modify file_url, which would break
-                    # the File document and exclude it from all future retry logic.
-                    frappe.log_error(
-                        title="S3 Migration: File Not Found",
-                        message=f"Local file not found for {file_doc.name}: {file_path}",
-                    )
-                    total_failed += 1
-                    continue
-
-                s3_key = s3_client.upload_file(file_doc)
-
-                new_file_url = (
-                    f"/api/method/aws_integration.api.s3.generate_file"
-                    f"?key={s3_key}&file_name={file_doc.file_name}"
-                )
-
-                frappe.db.set_value(
-                    "File",
-                    file_doc.name,
-                    {
-                        "file_url": new_file_url,
-                        "s3_key": s3_key,
-                        "is_on_s3": 1,
-                        "s3_uploaded_at": now_datetime(),
-                    },
-                    update_modified=False,
-                )
-
-                # Commit BEFORE removing the local file so that a failed commit
-                # never leaves the file permanently lost.
+            if settings.delete_local_after_upload and os.path.exists(file_path):
+                os.remove(file_path)
+                frappe.db.set_value("File", file_doc.name, "local_deleted", 1, update_modified=False)
                 frappe.db.commit()
 
-                if settings.delete_local_after_upload and os.path.exists(file_path):
-                    os.remove(file_path)
-                    frappe.db.set_value("File", file_doc.name, "local_deleted", 1, update_modified=False)
-                    frappe.db.commit()
+            uploaded += 1
 
-                total_uploaded += 1
+        except Exception:
+            failed += 1
+            frappe.log_error(
+                title="S3 Migration Error",
+                message=f"Failed to upload {file_name}: {frappe.get_traceback()}",
+            )
 
-            except Exception as e:
-                total_failed += 1
-                frappe.log_error(
-                    title="S3 Migration Error",
-                    message=f"Failed to upload {file_data.name}: {str(e)}\n{frappe.get_traceback()}",
-                )
-        frappe.publish_realtime(
-            "s3_migration_progress",
-            {"uploaded": total_uploaded, "failed": total_failed, "total": total_pending},
-        )
+    _update_migration_progress(migration_id, uploaded, failed, total)
 
-    frappe.publish_realtime(
-        "s3_migration_complete",
-        {"uploaded": total_uploaded, "failed": total_failed},
-    )
-    if total_failed:
-        frappe.log_error(
-            title="S3 Migration Summary",
-            message=f"S3 Migration Complete: {total_uploaded} uploaded, {total_failed} failed",
-        )
+
+def _migration_cache_key(migration_id):
+    """Return a site-prefixed Redis key for migration progress."""
+    return frappe.cache.make_key(f"s3_migration:{migration_id}")
+
+
+def _update_migration_progress(migration_id, batch_uploaded, batch_failed, total):
+    """Update migration progress using atomic Redis increments."""
+    cache_key = _migration_cache_key(migration_id)
+
+    # HINCRBY is atomic — safe under concurrent batch workers
+    uploaded = frappe.cache.hincrby(cache_key, "uploaded", batch_uploaded)
+    failed = frappe.cache.hincrby(cache_key, "failed", batch_failed)
+    completed_batches = frappe.cache.hincrby(cache_key, "completed_batches", 1)
+    total_batches = int(frappe.cache.hget(cache_key, "total_batches") or 0)
+
+    frappe.publish_realtime("s3_migration_progress", {
+        "uploaded": uploaded,
+        "failed": failed,
+        "total": total,
+    })
+
+    if completed_batches >= total_batches:
+        frappe.publish_realtime("s3_migration_complete", {
+            "uploaded": uploaded,
+            "failed": failed,
+        })
+        frappe.cache.delete(cache_key)
+        frappe.cache.delete_value("s3_bulk_migration_running")
 
 
 def cleanup_local_s3_files():
@@ -383,6 +406,7 @@ def _get_pending_filters(exempt_doctypes):
         "is_folder": 0,
         "file_url": ("like", "/%"),
         "is_on_s3": 0,
+        "s3_upload_skipped": 0,
     }
     if exempt_doctypes:
         filters["attached_to_doctype"] = ("not in", exempt_doctypes)

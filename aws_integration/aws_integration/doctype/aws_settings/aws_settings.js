@@ -186,28 +186,35 @@ frappe.ui.form.on("AWS Settings", {
             frm.add_custom_button(
                 __("Take Backup Now"),
                 function () {
-                    frappe.call({
-                        method: "aws_integration.s3.backup.take_s3_backup",
-                        freeze: true,
-                        freeze_message: __("Queuing S3 Backup..."),
-                        callback: function (r) {
-                            if (r.message && r.message.log_name) {
-                                frm._s3_active_stage = "queued";
-                                frm._s3_active_log = r.message.log_name;
-                                render_backup_status_card(frm, {
-                                    name: r.message.log_name,
-                                    status: "Queued",
-                                });
-                            }
-                        },
-                        error: function () {
-                            frappe.msgprint({
-                                title: __("Error"),
-                                indicator: "red",
-                                message: __("Failed to start S3 backup."),
+                    frappe.confirm(
+                        __("This will generate a full site backup and upload it to S3. Continue?"),
+                        function () {
+                            frappe.call({
+                                method: "aws_integration.s3.backup.take_s3_backup",
+                                freeze: true,
+                                freeze_message: __("Queuing S3 Backup..."),
+                                callback: function (r) {
+                                    if (r.message && r.message.log_name) {
+                                        frm._s3_queued_logs = [r.message.log_name];
+                                        frm._s3_total_count = 1;
+                                        frm._s3_completed_count = 0;
+                                        frm._s3_active_stage = "queued";
+                                        render_backup_status_card(frm, {
+                                            name: r.message.log_name,
+                                            status: "Queued",
+                                        });
+                                    }
+                                },
+                                error: function () {
+                                    frappe.msgprint({
+                                        title: __("Error"),
+                                        indicator: "red",
+                                        message: __("Failed to start S3 backup."),
+                                    });
+                                },
                             });
-                        },
-                    });
+                        }
+                    );
                 },
                 __("S3 Backups")
             );
@@ -224,6 +231,10 @@ frappe.ui.form.on("AWS Settings", {
                                 freeze_message: __("Scanning local backups..."),
                                 callback: function (r) {
                                     if (r.message) {
+                                        frm._s3_queued_logs = r.message.queued || [];
+                                        frm._s3_total_count = r.message.count || 0;
+                                        frm._s3_completed_count = 0;
+                                        frm._s3_active_stage = "queued";
                                         frappe.msgprint({
                                             title: __("Local Backups Queued"),
                                             indicator: "blue",
@@ -296,6 +307,12 @@ frappe.ui.form.on("AWS Settings", {
 
             frappe.realtime.off("s3_backup_progress");
             frappe.realtime.on("s3_backup_progress", function (data) {
+                // Ignore events not belonging to our tracked batch
+                let queued = frm._s3_queued_logs || [];
+                if (queued.length && data.log_name && queued.indexOf(data.log_name) === -1) {
+                    return;
+                }
+
                 if (data.status === "generating") {
                     frm._s3_active_stage = "generating";
                     update_stage_pipeline(frm, "generating");
@@ -303,9 +320,27 @@ frappe.ui.form.on("AWS Settings", {
                     frm._s3_active_stage = "uploading";
                     update_stage_pipeline(frm, "uploading");
                 } else if (data.status === "success" || data.status === "failed") {
-                    frm._s3_active_stage = null;
-                    frm._s3_active_log = null;
-                    fetch_and_render_backup_card(frm);
+                    // Remove completed log from the queue
+                    if (data.log_name && queued.length) {
+                        let idx = queued.indexOf(data.log_name);
+                        if (idx !== -1) {
+                            queued.splice(idx, 1);
+                        }
+                        frm._s3_completed_count = (frm._s3_completed_count || 0) + 1;
+                    }
+
+                    if (queued.length) {
+                        // More backups remain — show the next one
+                        frm._s3_active_stage = "queued";
+                        fetch_and_render_backup_card(frm);
+                    } else {
+                        // All done — clear tracking state
+                        frm._s3_queued_logs = [];
+                        frm._s3_total_count = 0;
+                        frm._s3_completed_count = 0;
+                        frm._s3_active_stage = null;
+                        fetch_and_render_backup_card(frm);
+                    }
                 }
             });
         }
@@ -342,9 +377,23 @@ function map_log_status_to_stage(status) {
 }
 
 function fetch_and_render_backup_card(frm) {
-    frappe.call({
-        method: "frappe.client.get_list",
-        args: {
+    let queued = frm._s3_queued_logs || [];
+    let fetch_args;
+
+    if (queued.length) {
+        // Fetch the first (currently active) log from the tracked batch
+        fetch_args = {
+            doctype: "S3 Backup Log",
+            fields: [
+                "name", "status", "started_at", "completed_at",
+                "total_size", "db_size", "files_size", "s3_bucket", "creation",
+            ],
+            filters: { name: queued[0] },
+            limit_page_length: 1,
+        };
+    } else {
+        // No active batch — fetch the latest log by creation
+        fetch_args = {
             doctype: "S3 Backup Log",
             fields: [
                 "name", "status", "started_at", "completed_at",
@@ -352,7 +401,12 @@ function fetch_and_render_backup_card(frm) {
             ],
             order_by: "creation desc",
             limit_page_length: 1,
-        },
+        };
+    }
+
+    frappe.call({
+        method: "frappe.client.get_list",
+        args: fetch_args,
         async: true,
         callback: function (r) {
             if (r.message && r.message.length) {
@@ -363,7 +417,17 @@ function fetch_and_render_backup_card(frm) {
                 if ((log.status === "Generating" || log.status === "Uploading") && frm._s3_active_stage) {
                     stage = frm._s3_active_stage;
                 }
-                render_backup_status_card(frm, log, stage);
+
+                let batch_info = null;
+                let total = frm._s3_total_count || 0;
+                if (total > 1) {
+                    batch_info = {
+                        current: (frm._s3_completed_count || 0) + 1,
+                        total: total,
+                    };
+                }
+
+                render_backup_status_card(frm, log, stage, batch_info);
             } else {
                 render_empty_backup_card(frm);
             }
@@ -391,7 +455,7 @@ function render_empty_backup_card(frm) {
     `);
 }
 
-function render_backup_status_card(frm, log, stage) {
+function render_backup_status_card(frm, log, stage, batch_info) {
     let wrapper = frm.fields_dict.s3_backup_status_html;
     if (!wrapper) return;
 
@@ -399,7 +463,7 @@ function render_backup_status_card(frm, log, stage) {
     if (!stage) stage = map_log_status_to_stage(log.status);
 
     let pipeline_html = build_stage_pipeline(stage, is_failed);
-    let summary_html = build_summary(log);
+    let summary_html = build_summary(log, batch_info);
 
     wrapper.$wrapper.html(`
         <div class="s3-backup-card" style="
@@ -500,7 +564,7 @@ function build_stage_pipeline(active_stage, is_failed) {
     return `<div style="display: flex; align-items: center;">${items.join(connector)}</div>`;
 }
 
-function build_summary(log) {
+function build_summary(log, batch_info) {
     let safe_name = frappe.utils.xss_sanitise(log.name || "");
     let link = `<a href="/app/s3-backup-log/${encodeURIComponent(safe_name)}">${safe_name}</a>`;
 
@@ -558,7 +622,12 @@ function build_summary(log) {
         ? `<div style="font-size: 12px; color: var(--text-muted); margin-top: 4px;">${details.join(" &nbsp;&middot;&nbsp; ")}</div>`
         : "";
 
-    return `<div>${top_line}</div>${bottom_line}`;
+    let batch_line = "";
+    if (batch_info && batch_info.total > 1) {
+        batch_line = `<div style="font-size: 12px; color: var(--blue-500); font-weight: 600; margin-top: 4px;">${__("Backup {0} of {1}", [batch_info.current, batch_info.total])}</div>`;
+    }
+
+    return `<div>${top_line}</div>${bottom_line}${batch_line}`;
 }
 
 function update_stage_pipeline(frm, stage) {
@@ -569,7 +638,7 @@ function update_stage_pipeline(frm, stage) {
     if (!pipeline_el.length) {
         // Card hasn't been rendered yet — render a minimal one
         render_backup_status_card(frm, {
-            name: frm._s3_active_log || "",
+            name: (frm._s3_queued_logs || [])[0] || "",
             status: "In Progress",
         }, stage);
         return;

@@ -18,8 +18,8 @@ frappe.ui.form.on("S3 Backup Log", {
 			formatSizeField(frm, fieldname);
 		});
 
-		// Show "Delete Local Files" button if local files haven't been cleaned
-		if (frm.doc.status === "Success" && !frm.doc.local_cleaned && frm.doc.local_backup_paths) {
+		// Show "Delete Local Files" button if backup is on S3 but local copies exist
+		if (frm.doc.status === "Success" && frm.doc.s3_bucket && !frm.doc.local_cleaned && frm.doc.local_backup_paths) {
 			frm.add_custom_button(__("Delete Local Files"), function () {
 				frappe.confirm(
 					__("This will permanently delete local backup files. Continue?"),

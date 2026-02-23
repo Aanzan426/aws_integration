@@ -195,7 +195,7 @@ def get_s3_status():
         WHERE is_folder=0 AND file_url LIKE '/%%' AND is_on_s3=0
         {exempt_clause}""".format(
             exempt_clause=(
-                "AND (attached_to_doctype IS NULL OR attached_to_doctype NOT IN ({0}))".format(
+                "AND (attached_to_doctype IS NULL OR attached_to_doctype NOT IN ({}))".format(
                     ", ".join(["%s"] * len(exempt_doctypes))
                 )
                 if exempt_doctypes
@@ -375,3 +375,22 @@ def get_file_preview(file_name=None, file_url=None):
         "content_type": content_type,
         "file_name": file_doc.file_name,
     }
+
+
+@frappe.whitelist()
+def delete_local_file(file_name):
+    """Delete the local copy of a file that has already been uploaded to S3."""
+    frappe.only_for("System Manager")
+
+    file_doc = frappe.get_doc("File", file_name)
+    if not file_doc.is_on_s3:
+        frappe.throw(_("File is not on S3"))
+    if file_doc.local_deleted:
+        frappe.throw(_("Local file already deleted"))
+
+    file_doc._delete_file_on_disk()
+
+    frappe.db.set_value("File", file_doc.name, "local_deleted", 1, update_modified=False)
+    frappe.db.commit()
+
+    return {"success": True}

@@ -8,37 +8,68 @@ frappe.ui.form.on("File", {
             frm.dashboard.set_headline(
                 `<span class="indicator-pill green">${label}</span>`
             );
-        } else if (!frm.doc.is_on_s3 && frm.doc.file_url && frm.doc.file_url.startsWith("/")) {
-            frm.add_custom_button(__("Upload to S3"), function () {
-                frappe.call({
-                    method: "aws_integration.api.s3.upload_single_file_to_s3",
-                    args: { file_name: frm.doc.name },
-                    freeze: true,
-                    freeze_message: __("Queuing file for S3 upload..."),
-                    callback: function (r) {
-                        if (r.message && r.message.success) {
-                            frappe.show_alert({
-                                message: __("File queued for S3 upload. The form will refresh automatically when complete."),
-                                indicator: "blue",
-                            }, 7);
-                        } else {
-                            frappe.msgprint({
-                                title: __("Error"),
-                                indicator: "red",
-                                message: r.message
-                                    ? r.message.message
-                                    : __("Failed to queue file for S3 upload."),
+
+            // Show "Delete Local File" button if file is on S3 but local copy exists
+            if (!frm.doc.local_deleted && frappe.user.has_role("System Manager")) {
+                frm.add_custom_button(__("Delete Local File"), function () {
+                    frappe.confirm(
+                        __("This will permanently delete the local copy of this file. The file will still be available on S3. Continue?"),
+                        function () {
+                            frappe.call({
+                                method: "aws_integration.api.s3.delete_local_file",
+                                args: { file_name: frm.doc.name },
+                                freeze: true,
+                                freeze_message: __("Deleting local file..."),
+                                callback: function (r) {
+                                    if (r.message && r.message.success) {
+                                        frappe.show_alert({
+                                            message: __("Local file deleted successfully."),
+                                            indicator: "green",
+                                        }, 5);
+                                        frm.reload_doc();
+                                    }
+                                },
                             });
                         }
-                    },
-                    error: function () {
-                        frappe.msgprint({
-                            title: __("Error"),
-                            indicator: "red",
-                            message: __("Failed to queue file for S3 upload."),
-                        });
-                    },
+                    );
                 });
+            }
+        } else if (!frm.doc.is_on_s3 && frm.doc.file_url && frm.doc.file_url.startsWith("/")) {
+            frm.add_custom_button(__("Upload to S3"), function () {
+                frappe.confirm(
+                    __("This will upload the file to S3. Continue?"),
+                    function () {
+                        frappe.call({
+                            method: "aws_integration.api.s3.upload_single_file_to_s3",
+                            args: { file_name: frm.doc.name },
+                            freeze: true,
+                            freeze_message: __("Queuing file for S3 upload..."),
+                            callback: function (r) {
+                                if (r.message && r.message.success) {
+                                    frappe.show_alert({
+                                        message: __("File queued for S3 upload. The form will refresh automatically when complete."),
+                                        indicator: "blue",
+                                    }, 7);
+                                } else {
+                                    frappe.msgprint({
+                                        title: __("Error"),
+                                        indicator: "red",
+                                        message: r.message
+                                            ? r.message.message
+                                            : __("Failed to queue file for S3 upload."),
+                                    });
+                                }
+                            },
+                            error: function () {
+                                frappe.msgprint({
+                                    title: __("Error"),
+                                    indicator: "red",
+                                    message: __("Failed to queue file for S3 upload."),
+                                });
+                            },
+                        });
+                    }
+                );
             });
         }
 

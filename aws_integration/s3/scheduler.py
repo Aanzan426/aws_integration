@@ -177,16 +177,14 @@ def bulk_migrate_files():
 
     migration_id = frappe.generate_hash(length=10)
 
-    # Store total_batches in a Redis hash for atomic progress tracking.
-    # TTL ensures cleanup if all workers crash/timeout.
-    cache_key = _migration_cache_key(migration_id)
-    frappe.cache.hset(cache_key, mapping={
+    # Store progress in cache. Updates are protected by a Redis lock
+    # in _update_migration_progress. TTL ensures cleanup on crash.
+    frappe.cache.set_value(f"s3_migration:{migration_id}", {
         "total_batches": len(chunks),
         "completed_batches": 0,
         "uploaded": 0,
         "failed": 0,
-    })
-    frappe.cache.expire(cache_key, 3600)
+    }, expires_in_sec=3600)
 
     for chunk in chunks:
         frappe.enqueue(
@@ -264,33 +262,32 @@ def _migrate_file_batch(file_names, migration_id, total):
     _update_migration_progress(migration_id, uploaded, failed, total)
 
 
-def _migration_cache_key(migration_id):
-    """Return a site-prefixed Redis key for migration progress."""
-    return frappe.cache.make_key(f"s3_migration:{migration_id}")
-
-
 def _update_migration_progress(migration_id, batch_uploaded, batch_failed, total):
-    """Update migration progress using atomic Redis increments."""
-    cache_key = _migration_cache_key(migration_id)
+    """Update migration progress under a Redis lock for atomicity."""
+    cache_key = f"s3_migration:{migration_id}"
+    lock_key = f"s3_migration_lock:{migration_id}"
 
-    # HINCRBY is atomic — safe under concurrent batch workers
-    uploaded = frappe.cache.hincrby(cache_key, "uploaded", batch_uploaded)
-    failed = frappe.cache.hincrby(cache_key, "failed", batch_failed)
-    completed_batches = frappe.cache.hincrby(cache_key, "completed_batches", 1)
-    total_batches = int(frappe.cache.hget(cache_key, "total_batches") or 0)
+    with frappe.cache.lock(lock_key, timeout=5):
+        progress = frappe.cache.get_value(cache_key) or {}
+
+        progress["uploaded"] = progress.get("uploaded", 0) + batch_uploaded
+        progress["failed"] = progress.get("failed", 0) + batch_failed
+        progress["completed_batches"] = progress.get("completed_batches", 0) + 1
+
+        frappe.cache.set_value(cache_key, progress, expires_in_sec=3600)
 
     frappe.publish_realtime("s3_migration_progress", {
-        "uploaded": uploaded,
-        "failed": failed,
+        "uploaded": progress["uploaded"],
+        "failed": progress["failed"],
         "total": total,
     })
 
-    if completed_batches >= total_batches:
+    if progress["completed_batches"] >= progress.get("total_batches", 0):
         frappe.publish_realtime("s3_migration_complete", {
-            "uploaded": uploaded,
-            "failed": failed,
+            "uploaded": progress["uploaded"],
+            "failed": progress["failed"],
         })
-        frappe.cache.delete(cache_key)
+        frappe.cache.delete_value(cache_key)
         frappe.cache.delete_value("s3_bulk_migration_running")
 
 

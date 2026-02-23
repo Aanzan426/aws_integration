@@ -129,6 +129,7 @@ def upload_local_backups():
 			"status": "Queued",
 		})
 		log.name = log_name
+		log.flags.name_set = True
 		log.local_backup_paths = json.dumps(backup_paths)
 		log.insert(ignore_permissions=True)
 		frappe.db.commit()

@@ -163,7 +163,8 @@ def get_s3_status():
             "s3_size": int,          # bytes
             "pending_size": int,     # bytes
             "last_uploaded_at": str or None,
-            "recent_errors": int
+            "recent_errors": int,
+            "recent_skipped": int
         }
     """
     frappe.only_for("System Manager")
@@ -226,14 +227,18 @@ def get_s3_status():
         "SELECT MAX(s3_uploaded_at) FROM `tabFile` WHERE is_on_s3=1"
     )[0][0]
 
-    # Recent S3 errors from Error Log (last 7 days)
-    recent_errors = frappe.db.count(
-        "Error Log",
-        {
-            "creation": (">=", frappe.utils.add_days(frappe.utils.nowdate(), -7)),
-            "method": ("like", "%s3%"),
-        },
-    )
+    # Recent S3 errors from Error Log (last 7 days), split by type
+    cutoff = frappe.utils.add_days(frappe.utils.nowdate(), -7)
+    error_counts = frappe.db.sql(
+        """SELECT
+            SUM(CASE WHEN method = 'S3 Upload Skipped' THEN 1 ELSE 0 END) AS skipped,
+            SUM(CASE WHEN method != 'S3 Upload Skipped' THEN 1 ELSE 0 END) AS errors
+        FROM `tabError Log`
+        WHERE creation >= %s AND method LIKE '%%s3%%'""",
+        cutoff,
+    )[0]
+    recent_errors = int(error_counts[1] or 0)
+    recent_skipped = int(error_counts[0] or 0)
 
     return {
         "on_s3": on_s3,
@@ -244,6 +249,7 @@ def get_s3_status():
         "pending_size": int(pending_size),
         "last_uploaded_at": str(last_uploaded_at) if last_uploaded_at else None,
         "recent_errors": recent_errors,
+        "recent_skipped": recent_skipped,
     }
 
 

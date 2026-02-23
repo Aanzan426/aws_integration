@@ -43,6 +43,7 @@
   "s3_backup_frequency",
   "column_break_s3_backup_1",
   "s3_backup_files",
+  "s3_backup_timeout",
   "s3_backup_storage_section",
   "s3_backup_bucket_name",
   "column_break_s3_backup_2",
@@ -277,6 +278,14 @@
    "fieldname": "s3_backup_files",
    "fieldtype": "Check",
    "label": "Backup Files"
+  },
+  {
+   "default": "6000",
+   "depends_on": "enable_s3_backups",
+   "description": "Max time (in seconds) for the backup background job. Increase for large sites. Default: 6000 (100 min)",
+   "fieldname": "s3_backup_timeout",
+   "fieldtype": "Int",
+   "label": "Backup Job Timeout (seconds)"
   },
   {
    "depends_on": "enable_s3_backups",

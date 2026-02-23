@@ -6,7 +6,7 @@ import traceback
 import boto3
 import frappe
 from frappe import _
-from frappe.utils import now_datetime
+from frappe.utils import cint, now_datetime
 from frappe.utils.backups import new_backup
 
 # ── Whitelisted APIs ──
@@ -133,10 +133,12 @@ def upload_local_backups():
 		log.insert(ignore_permissions=True)
 		frappe.db.commit()
 
+		backup_timeout = cint(settings.s3_backup_timeout) or 6000
+
 		frappe.enqueue(
 			_run_upload_existing,
 			queue="long",
-			timeout=6000,
+			timeout=backup_timeout,
 			log_name=log_name,
 			triggered_by=triggered_by,
 		)
@@ -217,10 +219,12 @@ def _enqueue_backup(triggered_by="Administrator"):
 	log.insert(ignore_permissions=True)
 	frappe.db.commit()
 
+	backup_timeout = cint(settings.s3_backup_timeout) or 6000
+
 	frappe.enqueue(
 		_run_backup,
 		queue="long",
-		timeout=6000,
+		timeout=backup_timeout,
 		log_name=log.name,
 		triggered_by=triggered_by,
 		retry_count=0,
@@ -310,10 +314,13 @@ def _run_backup(log_name, retry_count=0, triggered_by="Administrator"):
 		tb = traceback.format_exc()
 
 		if retry_count < 2:
+			retry_timeout = cint(
+				frappe.db.get_single_value("AWS Settings", "s3_backup_timeout")
+			) or 6000
 			frappe.enqueue(
 				_run_backup,
 				queue="long",
-				timeout=6000,
+				timeout=retry_timeout,
 				log_name=log_name,
 				triggered_by=triggered_by,
 				retry_count=retry_count + 1,

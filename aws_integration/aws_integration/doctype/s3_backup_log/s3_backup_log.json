@@ -96,13 +96,13 @@
   },
   {
    "fieldname": "db_size",
-   "fieldtype": "Int",
+   "fieldtype": "Float",
    "label": "Database Size",
    "read_only": 1
   },
   {
    "fieldname": "files_size",
-   "fieldtype": "Int",
+   "fieldtype": "Float",
    "label": "Files Size",
    "read_only": 1
   },
@@ -112,7 +112,7 @@
   },
   {
    "fieldname": "total_size",
-   "fieldtype": "Int",
+   "fieldtype": "Float",
    "label": "Total Size",
    "read_only": 1
   },

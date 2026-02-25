@@ -184,6 +184,38 @@ frappe.ui.form.on("AWS Settings", {
                 __("S3 Files")
             );
 
+            frm.add_custom_button(
+                __("Adopt Orphaned Files"),
+                function () {
+                    frappe.confirm(
+                        __(
+                            "This will scan public/files and private/files for files not tracked by any File document, "
+                            + "create File records for them, and queue them for S3 upload. Continue?"
+                        ),
+                        function () {
+                            frappe.call({
+                                method: "aws_integration.api.s3.adopt_orphaned_files",
+                                freeze: true,
+                                freeze_message: __("Scanning for orphaned files..."),
+                                callback: function (r) {
+                                    if (r.message) {
+                                        frappe.msgprint(r.message);
+                                    }
+                                },
+                                error: function () {
+                                    frappe.msgprint({
+                                        title: __("Error"),
+                                        indicator: "red",
+                                        message: __("Failed to scan for orphaned files."),
+                                    });
+                                },
+                            });
+                        }
+                    );
+                },
+                __("S3 Files")
+            );
+
         }
 
         if (frm.doc.enable_s3_backups) {
@@ -307,6 +339,27 @@ frappe.ui.form.on("AWS Settings", {
                     indicator: data.skipped ? "orange" : "green",
                     message: __("{0} local files deleted, {1} already removed, {2} skipped", [
                         data.deleted, data.missing, data.skipped
+                    ]),
+                });
+            });
+
+            frappe.realtime.off("s3_orphan_progress");
+            frappe.realtime.on("s3_orphan_progress", function (data) {
+                frappe.show_alert(
+                    __("{0} orphaned files adopted, {1} errors so far...", [
+                        data.adopted, data.errors
+                    ]),
+                    5
+                );
+            });
+
+            frappe.realtime.off("s3_orphan_complete");
+            frappe.realtime.on("s3_orphan_complete", function (data) {
+                frappe.msgprint({
+                    title: __("Orphan Adoption Complete"),
+                    indicator: data.errors ? "orange" : "green",
+                    message: __("{0} orphaned files adopted, {1} errors", [
+                        data.adopted, data.errors
                     ]),
                 });
             });

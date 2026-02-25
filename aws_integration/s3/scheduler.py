@@ -65,7 +65,7 @@ def upload_pending_files():
         return
 
     uploaded_count = 0
-    failed_count = 0
+    failed_files = []
 
     for file_data in files:
         # Skip files attached to exempt doctypes
@@ -135,18 +135,14 @@ def upload_pending_files():
 
             uploaded_count += 1
 
-        except Exception as e:
-            failed_count += 1
-            frappe.log_error(
-                title="S3 Upload Error",
-                message=f"Failed to upload {file_data.name}: {str(e)}\n{frappe.get_traceback()}",
-            )
+        except Exception:
+            failed_files.append(file_data.name)
             continue
 
-    if failed_count:
+    if failed_files:
         frappe.log_error(
-            title="S3 Upload Summary",
-            message=f"S3 Upload: {uploaded_count} uploaded, {failed_count} failed",
+            title="S3 Upload Errors",
+            message=f"{uploaded_count} uploaded, {len(failed_files)} failed:\n" + "\n".join(failed_files),
         )
 
 
@@ -215,7 +211,7 @@ def _migrate_file_batch(file_names, migration_id, total):
         return
 
     uploaded = 0
-    failed = 0
+    failed_files = []
 
     for file_name in file_names:
         try:
@@ -233,7 +229,7 @@ def _migrate_file_batch(file_names, migration_id, total):
             if not os.path.exists(file_path):
                 frappe.db.set_value("File", file_name, "s3_upload_skipped", 1, update_modified=False)
                 frappe.db.commit()
-                failed += 1
+                failed_files.append(file_name)
                 continue
 
             s3_key = s3_client.upload_file(file_doc)
@@ -260,13 +256,15 @@ def _migrate_file_batch(file_names, migration_id, total):
             uploaded += 1
 
         except Exception:
-            failed += 1
-            frappe.log_error(
-                title="S3 Migration Error",
-                message=f"Failed to upload {file_name}: {frappe.get_traceback()}",
-            )
+            failed_files.append(file_name)
 
-    _update_migration_progress(migration_id, uploaded, failed, total)
+    if failed_files:
+        frappe.log_error(
+            title="S3 Migration Errors",
+            message=f"{uploaded} uploaded, {len(failed_files)} failed:\n" + "\n".join(failed_files),
+        )
+
+    _update_migration_progress(migration_id, uploaded, len(failed_files), total)
 
 
 def _update_migration_progress(migration_id, batch_uploaded, batch_failed, total):
@@ -312,6 +310,7 @@ def cleanup_local_s3_files():
     total_deleted = 0
     total_skipped = 0
     total_missing = 0
+    skipped_files = []
 
     cleanup_filters = {"is_folder": 0, "is_on_s3": 1, "local_deleted": 0}
     total_pending = frappe.db.count("File", cleanup_filters)
@@ -361,12 +360,9 @@ def cleanup_local_s3_files():
                 if file_data.s3_key:
                     _update_parent_attach_field(file_doc, old_url, s3_file_url)
 
-            except Exception as e:
+            except Exception:
                 total_skipped += 1
-                frappe.log_error(
-                    title="S3 Cleanup Error",
-                    message=f"Failed to clean up {file_data.name}: {str(e)}",
-                )
+                skipped_files.append(file_data.name)
 
         # Commit after each batch so progress is not lost on crash
         frappe.db.commit()
@@ -393,11 +389,129 @@ def cleanup_local_s3_files():
         },
     )
 
-    if total_skipped:
+    if skipped_files:
         frappe.log_error(
-            title="S3 Local Cleanup Summary",
-            message=f"S3 Local Cleanup: {total_deleted} deleted, {total_missing} already gone, {total_skipped} skipped",
+            title="S3 Local Cleanup Errors",
+            message=f"{total_deleted} deleted, {total_missing} already gone, {len(skipped_files)} failed:\n"
+            + "\n".join(skipped_files),
         )
+
+
+def adopt_orphaned_files():
+    """Background job: Find files on disk with no File document and create File docs.
+
+    Walks public/files and private/files in streaming batches, cross-references
+    the database, and creates File documents for any orphans found. The S3 hourly
+    scheduler will then upload them on its next run.
+
+    Uses a Redis lock to prevent duplicate runs from creating duplicate File docs.
+    Resolves symlinks to prevent path traversal outside the site directory.
+    """
+    lock_key = "s3_adopt_orphans_running"
+    if frappe.cache.get_value(lock_key):
+        return
+    frappe.cache.set_value(lock_key, 1, expires_in_sec=3600)
+
+    site_path = frappe.get_site_path()
+    adopted = 0
+    errors = 0
+
+    try:
+        for base_dir, is_private in [("public/files", 0), ("private/files", 1)]:
+            full_dir = os.path.join(site_path, base_dir)
+            real_base = os.path.realpath(full_dir)
+            if not os.path.isdir(real_base):
+                continue
+
+            # Stream disk files in batches to cap memory usage
+            batch = {}
+            for root, _dirs, files in os.walk(full_dir):
+                for fname in files:
+                    full_path = os.path.join(root, fname)
+
+                    # Symlink boundary check — prevent traversal outside site dir
+                    if not os.path.realpath(full_path).startswith(real_base + os.sep):
+                        continue
+
+                    rel_path = os.path.relpath(full_path, site_path)
+                    if is_private:
+                        file_url = "/" + rel_path
+                    else:
+                        file_url = "/" + rel_path.replace("public/", "", 1)
+                    batch[file_url] = full_path
+
+                    if len(batch) >= 1000:
+                        a, e = _process_orphan_batch(batch, is_private)
+                        adopted += a
+                        errors += e
+                        batch.clear()
+                        frappe.publish_realtime(
+                            "s3_orphan_progress",
+                            {"adopted": adopted, "errors": errors},
+                        )
+
+            # Process remaining files in the last partial batch
+            if batch:
+                a, e = _process_orphan_batch(batch, is_private)
+                adopted += a
+                errors += e
+    finally:
+        frappe.cache.delete_value(lock_key)
+
+    frappe.db.commit()
+    frappe.publish_realtime(
+        "s3_orphan_complete",
+        {"adopted": adopted, "errors": errors},
+    )
+
+
+def _process_orphan_batch(batch, is_private):
+    """Create File documents for orphaned files in a single batch.
+
+    Queries the database to find which file_urls already exist,
+    then creates File documents for the rest. Errors are collected
+    and logged once at the end to avoid per-file Error Log pollution.
+
+    Returns:
+        tuple: (adopted_count, error_count)
+    """
+    urls = list(batch.keys())
+    results = frappe.db.sql(
+        "SELECT file_url FROM `tabFile` WHERE file_url IN ({})".format(
+            ", ".join(["%s"] * len(urls))
+        ),
+        tuple(urls),
+    )
+    existing = {r[0] for r in results}
+
+    adopted = 0
+    failed_urls = []
+
+    for file_url, full_path in batch.items():
+        if file_url in existing:
+            continue
+
+        try:
+            file_doc = frappe.new_doc("File")
+            file_doc.file_name = os.path.basename(full_path)
+            file_doc.file_url = file_url
+            file_doc.is_private = is_private
+            file_doc.file_size = os.path.getsize(full_path)
+            file_doc.folder = "Home"
+            file_doc.flags.skip_s3_upload = True
+            file_doc.insert(ignore_permissions=True)
+            adopted += 1
+        except Exception:
+            failed_urls.append(file_url)
+
+    if failed_urls:
+        frappe.log_error(
+            title="Orphan File Adoption Errors",
+            message=f"{len(failed_urls)} files failed:\n" + "\n".join(failed_urls),
+        )
+
+    frappe.db.commit()
+    return adopted, len(failed_urls)
 
 
 def _get_pending_filters(exempt_doctypes):

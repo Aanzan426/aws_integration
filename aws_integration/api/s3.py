@@ -404,3 +404,37 @@ def delete_local_file(file_name):
     frappe.db.commit()
 
     return {"success": True}
+
+
+@frappe.whitelist()
+def adopt_orphaned_files():
+    """Find files on disk with no File document, create File docs, and queue for S3 upload.
+
+    Scans public/files and private/files for orphaned files (present on disk
+    but not tracked by any File document). Creates File documents so the
+    S3 scheduler can upload them on its next run.
+
+    Returns:
+        str: Status message.
+    """
+    frappe.only_for("System Manager")
+
+    settings = frappe.get_cached_doc("AWS Settings")
+    if not settings.enable_aws or not settings.enable_s3:
+        frappe.throw(_("S3 is not enabled in AWS Settings"))
+
+    lock_key = "s3_adopt_orphans_running"
+    if frappe.cache.get_value(lock_key):
+        return _("Orphan file adoption is already running. Please wait for it to complete.")
+
+    frappe.enqueue(
+        "aws_integration.s3.scheduler.adopt_orphaned_files",
+        queue="long",
+        timeout=3600,
+        now=False,
+    )
+
+    return _(
+        "Scanning for orphaned files in the background. "
+        "You will be notified when the scan is complete."
+    )

@@ -13,6 +13,9 @@ def on_file_upload(doc, method):
     Enqueues a short background job so the user's request is not blocked.
     Only runs when 'Instant Upload to S3' is enabled in AWS Settings.
     """
+    if getattr(doc.flags, "skip_s3_upload", False):
+        return
+
     if doc.is_folder or doc.is_on_s3:
         return
 

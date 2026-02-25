@@ -140,6 +140,7 @@ def _upload_single_file(file_name):
     frappe.db.commit()
 
     if settings.delete_local_after_upload and os.path.exists(file_path):
+        old_url = file_doc.file_url
         file_doc._delete_file_on_disk()
         if not os.path.exists(file_path):
             s3_file_url = get_s3_file_url(s3_key, file_doc.file_name)
@@ -147,6 +148,7 @@ def _upload_single_file(file_name):
                 "local_deleted": 1,
                 "file_url": s3_file_url,
             }, update_modified=False)
+            _update_parent_attach_field(file_doc, old_url, s3_file_url)
         frappe.db.commit()
 
     # Notify the browser so the File form auto-refreshes with the S3 indicator
@@ -194,6 +196,56 @@ def _mark_dedup_file_as_s3(doc, s3_key=None, uploaded_at=None):
         },
         update_modified=False,
     )
+
+
+def _update_parent_attach_field(file_doc, old_url, new_url):
+    """Update Attach/Attach Image fields on parent document when file_url changes.
+
+    When a file is uploaded to S3 and the local copy is deleted, the File doc's
+    file_url changes from a local path to the S3 API route. But if the file was
+    attached via an Attach field, that field on the parent document still holds
+    the old local URL. This function finds and updates the stale reference.
+    """
+    if not file_doc.attached_to_doctype or not file_doc.attached_to_name:
+        return
+
+    if not old_url or not new_url or old_url == new_url:
+        return
+
+    try:
+        meta = frappe.get_meta(file_doc.attached_to_doctype)
+    except Exception:
+        return
+
+    attach_fields = [
+        df.fieldname for df in meta.fields
+        if df.fieldtype in ("Attach", "Attach Image")
+    ]
+
+    if not attach_fields:
+        return
+
+    values = frappe.db.get_value(
+        file_doc.attached_to_doctype,
+        file_doc.attached_to_name,
+        attach_fields,
+        as_dict=True,
+    )
+
+    if not values:
+        return
+
+    for fieldname in attach_fields:
+        if values.get(fieldname) == old_url:
+            frappe.db.set_value(
+                file_doc.attached_to_doctype,
+                file_doc.attached_to_name,
+                fieldname,
+                new_url,
+                update_modified=False,
+            )
+            frappe.clear_document_cache(file_doc.attached_to_doctype, file_doc.attached_to_name)
+            break
 
 
 def on_file_delete(doc, method):

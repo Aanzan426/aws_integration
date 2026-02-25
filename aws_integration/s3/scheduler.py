@@ -4,6 +4,7 @@ import frappe
 from frappe.utils import cint, now_datetime
 
 from aws_integration.s3 import get_s3_file_url
+from aws_integration.s3.handlers import _update_parent_attach_field
 
 
 def upload_pending_files():
@@ -121,12 +122,15 @@ def upload_pending_files():
             # Optionally remove the local copy after a successful upload.
             # Only now switch file_url to the S3 API route.
             if settings.delete_local_after_upload and os.path.exists(file_path):
+                old_url = file_doc.file_url
                 file_doc._delete_file_on_disk()
                 if not os.path.exists(file_path):
+                    s3_file_url = get_s3_file_url(s3_key, file_doc.file_name)
                     frappe.db.set_value("File", file_doc.name, {
                         "local_deleted": 1,
-                        "file_url": get_s3_file_url(s3_key, file_doc.file_name),
+                        "file_url": s3_file_url,
                     }, update_modified=False)
+                    _update_parent_attach_field(file_doc, old_url, s3_file_url)
                 frappe.db.commit()
 
             uploaded_count += 1
@@ -242,12 +246,15 @@ def _migrate_file_batch(file_names, migration_id, total):
             frappe.db.commit()
 
             if settings.delete_local_after_upload and os.path.exists(file_path):
+                old_url = file_doc.file_url
                 file_doc._delete_file_on_disk()
                 if not os.path.exists(file_path):
+                    s3_file_url = get_s3_file_url(s3_key, file_doc.file_name)
                     frappe.db.set_value("File", file_doc.name, {
                         "local_deleted": 1,
-                        "file_url": get_s3_file_url(s3_key, file_doc.file_name),
+                        "file_url": s3_file_url,
                     }, update_modified=False)
+                    _update_parent_attach_field(file_doc, old_url, s3_file_url)
                 frappe.db.commit()
 
             uploaded += 1
@@ -346,9 +353,13 @@ def cleanup_local_s3_files():
 
                 # Mark as locally deleted and switch file_url to S3 API route
                 update_fields = {"local_deleted": 1}
+                old_url = file_data.file_url
                 if file_data.s3_key:
-                    update_fields["file_url"] = get_s3_file_url(file_data.s3_key, file_data.file_name)
+                    s3_file_url = get_s3_file_url(file_data.s3_key, file_data.file_name)
+                    update_fields["file_url"] = s3_file_url
                 frappe.db.set_value("File", file_data.name, update_fields, update_modified=False)
+                if file_data.s3_key:
+                    _update_parent_attach_field(file_doc, old_url, s3_file_url)
 
             except Exception as e:
                 total_skipped += 1

@@ -9,6 +9,21 @@ frappe.ui.form.on("File", {
                 `<span class="indicator-pill green">${label}</span>`
             );
 
+            // Show "View on S3" button when local copy still exists (file_url points to local)
+            if (!frm.doc.local_deleted) {
+                frm.add_custom_button(__("View on S3"), function () {
+                    frappe.call({
+                        method: "aws_integration.api.s3.get_file_preview",
+                        args: { file_name: frm.doc.name },
+                        callback: function (r) {
+                            if (r.message && r.message.url) {
+                                window.open(r.message.url, "_blank");
+                            }
+                        },
+                    });
+                });
+            }
+
             // Show "Delete Local File" button if file is on S3 but local copy exists
             if (!frm.doc.local_deleted && frappe.user.has_role("System Manager")) {
                 frm.add_custom_button(__("Delete Local File"), function () {

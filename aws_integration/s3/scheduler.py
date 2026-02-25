@@ -3,6 +3,8 @@ import os
 import frappe
 from frappe.utils import cint, now_datetime
 
+from aws_integration.s3 import get_s3_file_url
+
 
 def upload_pending_files():
     """Scheduler job: Upload local files to S3.
@@ -99,18 +101,12 @@ def upload_pending_files():
             # Upload to S3 and receive the object key
             s3_key = s3_client.upload_file(file_doc)
 
-            # Build the new file_url that proxies through the Frappe API
-            new_file_url = (
-                f"/api/method/aws_integration.api.s3.generate_file"
-                f"?key={s3_key}&file_name={file_doc.file_name}"
-            )
-
-            # Persist S3 metadata on the File document without touching modified timestamp
+            # Persist S3 metadata on the File document without touching modified timestamp.
+            # Keep file_url as the local path so the file can be served locally.
             frappe.db.set_value(
                 "File",
                 file_doc.name,
                 {
-                    "file_url": new_file_url,
                     "s3_key": s3_key,
                     "is_on_s3": 1,
                     "s3_uploaded_at": now_datetime(),
@@ -122,10 +118,15 @@ def upload_pending_files():
             # never leaves the file permanently lost.
             frappe.db.commit()
 
-            # Optionally remove the local copy after a successful upload
+            # Optionally remove the local copy after a successful upload.
+            # Only now switch file_url to the S3 API route.
             if settings.delete_local_after_upload and os.path.exists(file_path):
-                os.remove(file_path)
-                frappe.db.set_value("File", file_doc.name, "local_deleted", 1, update_modified=False)
+                file_doc._delete_file_on_disk()
+                if not os.path.exists(file_path):
+                    frappe.db.set_value("File", file_doc.name, {
+                        "local_deleted": 1,
+                        "file_url": get_s3_file_url(s3_key, file_doc.file_name),
+                    }, update_modified=False)
                 frappe.db.commit()
 
             uploaded_count += 1
@@ -232,13 +233,8 @@ def _migrate_file_batch(file_names, migration_id, total):
                 continue
 
             s3_key = s3_client.upload_file(file_doc)
-            new_file_url = (
-                f"/api/method/aws_integration.api.s3.generate_file"
-                f"?key={s3_key}&file_name={file_doc.file_name}"
-            )
 
             frappe.db.set_value("File", file_doc.name, {
-                "file_url": new_file_url,
                 "s3_key": s3_key,
                 "is_on_s3": 1,
                 "s3_uploaded_at": now_datetime(),
@@ -246,8 +242,12 @@ def _migrate_file_batch(file_names, migration_id, total):
             frappe.db.commit()
 
             if settings.delete_local_after_upload and os.path.exists(file_path):
-                os.remove(file_path)
-                frappe.db.set_value("File", file_doc.name, "local_deleted", 1, update_modified=False)
+                file_doc._delete_file_on_disk()
+                if not os.path.exists(file_path):
+                    frappe.db.set_value("File", file_doc.name, {
+                        "local_deleted": 1,
+                        "file_url": get_s3_file_url(s3_key, file_doc.file_name),
+                    }, update_modified=False)
                 frappe.db.commit()
 
             uploaded += 1
@@ -317,7 +317,7 @@ def cleanup_local_s3_files():
         files = frappe.get_all(
             "File",
             filters=cleanup_filters,
-            fields=["name", "file_name", "file_url", "is_private"],
+            fields=["name", "file_name", "file_url", "is_private", "s3_key"],
             limit_page_length=batch_size,
             order_by="creation asc",
         )
@@ -327,36 +327,28 @@ def cleanup_local_s3_files():
 
         for file_data in files:
             try:
-                # Build the expected local path from the original file_name
-                site_path = frappe.get_site_path(
-                    "private" if file_data.is_private else "public",
-                    "files",
-                    file_data.file_name,
-                )
+                file_doc = frappe.get_doc("File", file_data.name)
+                file_path = file_doc.get_full_path()
+                existed = os.path.exists(file_path)
 
-                # Validate resolved path stays within the expected directory
-                real_path = os.path.realpath(site_path)
-                expected_base = os.path.realpath(
-                    frappe.get_site_path(
-                        "private" if file_data.is_private else "public", "files"
-                    )
-                )
-                if not real_path.startswith(expected_base + os.sep):
-                    frappe.log_error(
-                        title="S3 Cleanup: Path Traversal Blocked",
-                        message=f"Blocked deletion of {site_path} for {file_data.name}",
-                    )
+                if existed:
+                    file_doc._delete_file_on_disk()
+
+                if existed and os.path.exists(file_path):
+                    # File still exists — shared via content_hash, skip
                     total_skipped += 1
                     continue
 
-                if os.path.exists(real_path):
-                    os.remove(real_path)
+                if existed:
                     total_deleted += 1
                 else:
                     total_missing += 1
 
-                # Mark as locally deleted whether the file existed or was already gone
-                frappe.db.set_value("File", file_data.name, "local_deleted", 1, update_modified=False)
+                # Mark as locally deleted and switch file_url to S3 API route
+                update_fields = {"local_deleted": 1}
+                if file_data.s3_key:
+                    update_fields["file_url"] = get_s3_file_url(file_data.s3_key, file_data.file_name)
+                frappe.db.set_value("File", file_data.name, update_fields, update_modified=False)
 
             except Exception as e:
                 total_skipped += 1

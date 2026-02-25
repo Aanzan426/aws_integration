@@ -3,6 +3,8 @@ import mimetypes
 import frappe
 from frappe import _
 
+from aws_integration.s3 import get_s3_file_url
+
 
 @frappe.whitelist(allow_guest=True)
 def generate_file(key=None, file_name=None):
@@ -395,7 +397,10 @@ def delete_local_file(file_name):
 
     file_doc._delete_file_on_disk()
 
-    frappe.db.set_value("File", file_doc.name, "local_deleted", 1, update_modified=False)
+    frappe.db.set_value("File", file_doc.name, {
+        "local_deleted": 1,
+        "file_url": get_s3_file_url(file_doc.s3_key, file_doc.file_name),
+    }, update_modified=False)
     frappe.db.commit()
 
     return {"success": True}

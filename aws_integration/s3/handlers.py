@@ -4,7 +4,7 @@ from urllib.parse import parse_qs, urlparse
 import frappe
 from frappe.utils import now_datetime
 
-S3_API_PREFIX = "/api/method/aws_integration.api.s3.generate_file"
+from aws_integration.s3 import S3_API_PREFIX, get_s3_file_url
 
 
 def on_file_upload(doc, method):
@@ -25,6 +25,19 @@ def on_file_upload(doc, method):
     if doc.file_url.startswith(S3_API_PREFIX):
         _mark_dedup_file_as_s3(doc)
         return
+
+    # Dedup-created docs may copy a local file_url from a file already on S3.
+    # Detect via content_hash and mark as S3 without re-uploading.
+    if doc.content_hash:
+        existing_s3 = frappe.db.get_value(
+            "File",
+            {"content_hash": doc.content_hash, "is_on_s3": 1, "name": ["!=", doc.name]},
+            ["s3_key", "s3_uploaded_at"],
+            as_dict=True,
+        )
+        if existing_s3:
+            _mark_dedup_file_as_s3(doc, s3_key=existing_s3.s3_key, uploaded_at=existing_s3.s3_uploaded_at)
+            return
 
     if doc.file_url.startswith("/api/method/"):
         return
@@ -67,8 +80,8 @@ def _upload_single_file(file_name):
 
     file_doc = frappe.get_doc("File", file_name)
 
-    # Re-check is_on_s3 with a fresh DB read to catch any cached-doc stale data
-    if frappe.db.get_value("File", file_name, "is_on_s3"):
+    # get_doc already does a fresh DB read — check directly
+    if file_doc.is_on_s3:
         return
 
     # Acquire a row-level lock; if another worker already claimed this file
@@ -88,6 +101,21 @@ def _upload_single_file(file_name):
         frappe.db.commit()
         return
 
+    # Dedup check (also in on_file_upload — repeated here because another file
+    # with the same content_hash may have been uploaded to S3 between the hook
+    # enqueue and this background job executing).
+    if file_doc.content_hash:
+        existing_s3 = frappe.db.get_value(
+            "File",
+            {"content_hash": file_doc.content_hash, "is_on_s3": 1, "name": ["!=", file_doc.name]},
+            ["s3_key", "s3_uploaded_at"],
+            as_dict=True,
+        )
+        if existing_s3:
+            _mark_dedup_file_as_s3(file_doc, s3_key=existing_s3.s3_key, uploaded_at=existing_s3.s3_uploaded_at)
+            frappe.db.commit()
+            return
+
     file_path = file_doc.get_full_path()
     if not os.path.exists(file_path):
         return
@@ -96,16 +124,10 @@ def _upload_single_file(file_name):
     s3_client = S3Client()
     s3_key = s3_client.upload_file(file_doc)
 
-    new_file_url = (
-        f"/api/method/aws_integration.api.s3.generate_file"
-        f"?key={s3_key}&file_name={file_doc.file_name}"
-    )
-
     frappe.db.set_value(
         "File",
         file_doc.name,
         {
-            "file_url": new_file_url,
             "s3_key": s3_key,
             "is_on_s3": 1,
             "s3_uploaded_at": now_datetime(),
@@ -118,41 +140,60 @@ def _upload_single_file(file_name):
     frappe.db.commit()
 
     if settings.delete_local_after_upload and os.path.exists(file_path):
-        os.remove(file_path)
-        frappe.db.set_value("File", file_doc.name, "local_deleted", 1, update_modified=False)
+        file_doc._delete_file_on_disk()
+        if not os.path.exists(file_path):
+            s3_file_url = get_s3_file_url(s3_key, file_doc.file_name)
+            frappe.db.set_value("File", file_doc.name, {
+                "local_deleted": 1,
+                "file_url": s3_file_url,
+            }, update_modified=False)
         frappe.db.commit()
 
     # Notify the browser so the File form auto-refreshes with the S3 indicator
     frappe.publish_realtime("s3_upload_complete", {"file_name": file_doc.name})
 
 
-def _mark_dedup_file_as_s3(doc):
+def _mark_dedup_file_as_s3(doc, s3_key=None, uploaded_at=None):
     """Mark a dedup-created File doc as already on S3.
 
-    When Frappe's content_hash dedup copies an S3 API URL to a new File doc,
-    the doc has is_on_s3=0 and no s3_key. This extracts the key from the URL
-    and sets the correct S3 fields so the file shows up as "Stored on S3".
-    """
-    parsed = urlparse(doc.file_url)
-    params = parse_qs(parsed.query)
-    s3_key = params.get("key", [None])[0]
+    When Frappe's content_hash dedup copies a file_url to a new File doc,
+    the doc has is_on_s3=0 and no s3_key. This sets the correct S3 fields
+    so the file shows up as "Stored on S3".
 
-    if s3_key:
-        # Preserve the original upload timestamp from the source file
-        original_uploaded_at = frappe.db.get_value(
+    Args:
+        doc: The File document to mark.
+        s3_key: S3 object key. If not provided, extracted from file_url (backward compat).
+        uploaded_at: Original upload timestamp. If not provided, looked up from DB.
+    """
+    if not s3_key and doc.file_url and doc.file_url.startswith(S3_API_PREFIX):
+        # Backward compat: extract from URL for existing files
+        parsed = urlparse(doc.file_url)
+        params = parse_qs(parsed.query)
+        s3_key = params.get("key", [None])[0]
+
+    if not s3_key:
+        return
+
+    if not uploaded_at:
+        # Re-validate that a file with this s3_key still exists on S3.
+        # Guards against TOCTOU: the source file may have been deleted
+        # between the content_hash lookup and this point.
+        uploaded_at = frappe.db.get_value(
             "File", {"s3_key": s3_key, "is_on_s3": 1}, "s3_uploaded_at"
         )
+        if not uploaded_at:
+            return
 
-        frappe.db.set_value(
-            "File",
-            doc.name,
-            {
-                "is_on_s3": 1,
-                "s3_key": s3_key,
-                "s3_uploaded_at": original_uploaded_at or now_datetime(),
-            },
-            update_modified=False,
-        )
+    frappe.db.set_value(
+        "File",
+        doc.name,
+        {
+            "is_on_s3": 1,
+            "s3_key": s3_key,
+            "s3_uploaded_at": uploaded_at,
+        },
+        update_modified=False,
+    )
 
 
 def on_file_delete(doc, method):

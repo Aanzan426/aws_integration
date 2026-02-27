@@ -1,9 +1,11 @@
 import mimetypes
+from urllib.parse import unquote
 
 import frappe
 from frappe import _
 
 from aws_integration.s3 import get_s3_file_url
+from aws_integration.s3.handlers import _update_parent_attach_field
 
 
 @frappe.whitelist(allow_guest=True)
@@ -34,6 +36,8 @@ def generate_file(key=None, file_name=None):
     if not key:
         frappe.throw(_("File key is required"), frappe.ValidationError)
 
+    key = unquote(key)  # handle both raw and pre-encoded keys
+
     # Find the File document by s3_key
     file_name_doc = frappe.db.get_value(
         "File",
@@ -56,6 +60,14 @@ def generate_file(key=None, file_name=None):
                 "read",
                 file_name_doc.attached_to_name,
             ):
+                raise frappe.PermissionError(
+                    _("You don't have permission to access this file")
+                )
+        else:
+            # Private file not attached to any document — only the owner
+            # and System Manager should be able to access it.
+            file_owner = frappe.db.get_value("File", file_name_doc.name, "owner")
+            if file_owner != frappe.session.user and "System Manager" not in frappe.get_roles():
                 raise frappe.PermissionError(
                     _("You don't have permission to access this file")
                 )
@@ -179,36 +191,33 @@ def get_s3_status():
     on_s3 = frappe.db.count("File", {"is_folder": 0, "is_on_s3": 1})
 
     # Total S3 file size (from file_size field)
-    s3_size = frappe.db.sql(
-        "SELECT COALESCE(SUM(file_size), 0) FROM `tabFile` WHERE is_folder=0 AND is_on_s3=1"
-    )[0][0]
+    File = frappe.qb.DocType("File")
+    s3_size = (
+        frappe.qb.from_(File)
+        .select(frappe.qb.functions.Coalesce(frappe.qb.functions.Sum(File.file_size), 0))
+        .where(File.is_folder == 0)
+        .where(File.is_on_s3 == 1)
+    ).run()[0][0]
 
     # Pending local files (not on S3, local URL, not skipped)
-    pending_filters = {
-        "is_folder": 0,
-        "file_url": ("like", "/%"),
-        "is_on_s3": 0,
-        "s3_upload_skipped": 0,
-    }
+    # Use frappe.qb for both count and size so NULL handling is consistent:
+    # files with no attached_to_doctype (NULL) must be included.
+    pending_base = (
+        frappe.qb.from_(File)
+        .where(File.is_folder == 0)
+        .where(File.file_url.like("/%"))
+        .where(File.is_on_s3 == 0)
+        .where(File.s3_upload_skipped == 0)
+    )
     if exempt_doctypes:
-        pending_filters["attached_to_doctype"] = ("not in", exempt_doctypes)
+        pending_base = pending_base.where(
+            (File.attached_to_doctype.isnull()) | (File.attached_to_doctype.notin(exempt_doctypes))
+        )
 
-    pending = frappe.db.count("File", pending_filters)
-
-    pending_size = frappe.db.sql(
-        """SELECT COALESCE(SUM(file_size), 0) FROM `tabFile`
-        WHERE is_folder=0 AND file_url LIKE '/%%' AND is_on_s3=0 AND s3_upload_skipped=0
-        {exempt_clause}""".format(
-            exempt_clause=(
-                "AND (attached_to_doctype IS NULL OR attached_to_doctype NOT IN ({}))".format(
-                    ", ".join(["%s"] * len(exempt_doctypes))
-                )
-                if exempt_doctypes
-                else ""
-            )
-        ),
-        tuple(exempt_doctypes) if exempt_doctypes else (),
-    )[0][0]
+    Fn = frappe.qb.functions
+    result = pending_base.select(Fn.Count("*"), Fn.Coalesce(Fn.Sum(File.file_size), 0)).run()
+    pending = result[0][0]
+    pending_size = result[0][1]
 
     # Exempt files count (local files attached to exempt doctypes)
     exempt = 0
@@ -395,12 +404,15 @@ def delete_local_file(file_name):
     if file_doc.local_deleted:
         frappe.throw(_("Local file already deleted"))
 
+    old_url = file_doc.file_url
     file_doc._delete_file_on_disk()
 
+    s3_file_url = get_s3_file_url(file_doc.s3_key, file_doc.file_name)
     frappe.db.set_value("File", file_doc.name, {
         "local_deleted": 1,
-        "file_url": get_s3_file_url(file_doc.s3_key, file_doc.file_name),
+        "file_url": s3_file_url,
     }, update_modified=False)
+    _update_parent_attach_field(file_doc, old_url, s3_file_url)
     frappe.db.commit()
 
     return {"success": True}

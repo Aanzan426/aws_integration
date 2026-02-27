@@ -4,7 +4,7 @@ import frappe
 from frappe.utils import cint, now_datetime
 
 from aws_integration.s3 import get_s3_file_url
-from aws_integration.s3.handlers import _update_parent_attach_field
+from aws_integration.s3.handlers import _mark_dedup_file_as_s3, _update_parent_attach_field
 
 
 def upload_pending_files():
@@ -98,6 +98,21 @@ def upload_pending_files():
                 frappe.db.set_value("File", file_data.name, "s3_upload_skipped", 1, update_modified=False)
                 frappe.db.commit()
                 continue
+
+            # Content-hash dedup: if an identical file is already on S3,
+            # reuse its key instead of uploading again.
+            if file_doc.content_hash:
+                existing_s3 = frappe.db.get_value(
+                    "File",
+                    {"content_hash": file_doc.content_hash, "is_on_s3": 1, "name": ["!=", file_doc.name]},
+                    ["s3_key", "s3_uploaded_at"],
+                    as_dict=True,
+                )
+                if existing_s3:
+                    _mark_dedup_file_as_s3(file_doc, s3_key=existing_s3.s3_key, uploaded_at=existing_s3.s3_uploaded_at)
+                    frappe.db.commit()
+                    uploaded_count += 1
+                    continue
 
             # Upload to S3 and receive the object key
             s3_key = s3_client.upload_file(file_doc)
@@ -398,11 +413,13 @@ def cleanup_local_s3_files():
 
 
 def adopt_orphaned_files():
-    """Background job: Find files on disk with no File document and create File docs.
+    """Background job: Find files on disk with no File document, create File docs, and upload to S3.
 
     Walks public/files and private/files in streaming batches, cross-references
-    the database, and creates File documents for any orphans found. The S3 hourly
-    scheduler will then upload them on its next run.
+    the database, creates File documents for any orphans found, and uploads each
+    to S3 following the same flow as regular file uploads (content-hash dedup,
+    S3 upload, optional local deletion). If an S3 upload fails, the File doc is
+    still committed so the hourly scheduler can retry.
 
     Uses a Redis lock to prevent duplicate runs from creating duplicate File docs.
     Resolves symlinks to prevent path traversal outside the site directory.
@@ -417,6 +434,12 @@ def adopt_orphaned_files():
     errors = 0
 
     try:
+        settings = frappe.get_cached_doc("AWS Settings")
+
+        from aws_integration.s3.client import S3Client
+
+        s3_client = S3Client()
+
         for base_dir, is_private in [("public/files", 0), ("private/files", 1)]:
             full_dir = os.path.join(site_path, base_dir)
             real_base = os.path.realpath(full_dir)
@@ -441,7 +464,7 @@ def adopt_orphaned_files():
                     batch[file_url] = full_path
 
                     if len(batch) >= 1000:
-                        a, e = _process_orphan_batch(batch, is_private)
+                        a, e = _process_orphan_batch(batch, is_private, s3_client, settings)
                         adopted += a
                         errors += e
                         batch.clear()
@@ -452,29 +475,39 @@ def adopt_orphaned_files():
 
             # Process remaining files in the last partial batch
             if batch:
-                a, e = _process_orphan_batch(batch, is_private)
+                a, e = _process_orphan_batch(batch, is_private, s3_client, settings)
                 adopted += a
                 errors += e
+    except Exception as e:
+        frappe.log_error(
+            title="Orphan Adoption Error",
+            message=f"Failed during orphan adoption: {str(e)}",
+        )
     finally:
         frappe.cache.delete_value(lock_key)
+        frappe.db.commit()
+        frappe.publish_realtime(
+            "s3_orphan_complete",
+            {"adopted": adopted, "errors": errors},
+        )
 
-    frappe.db.commit()
-    frappe.publish_realtime(
-        "s3_orphan_complete",
-        {"adopted": adopted, "errors": errors},
-    )
 
-
-def _process_orphan_batch(batch, is_private):
-    """Create File documents for orphaned files in a single batch.
+def _process_orphan_batch(batch, is_private, s3_client, settings):
+    """Create File documents for orphaned files and upload them to S3.
 
     Queries the database to find which file_urls already exist,
-    then creates File documents for the rest. Errors are collected
-    and logged once at the end to avoid per-file Error Log pollution.
+    then creates File documents for the rest and uploads each to S3
+    following the same flow as _upload_single_file (content-hash dedup,
+    S3 upload, optional local deletion). If the S3 upload fails for a
+    file, the File doc is still committed so upload_pending_files can
+    retry on the next scheduler run.
 
     Returns:
         tuple: (adopted_count, error_count)
     """
+    if not batch:
+        return 0, 0
+
     urls = list(batch.keys())
     results = frappe.db.sql(
         "SELECT file_url FROM `tabFile` WHERE file_url IN ({})".format(
@@ -491,6 +524,7 @@ def _process_orphan_batch(batch, is_private):
         if file_url in existing:
             continue
 
+        # --- Step 1: Create File document ---
         try:
             file_doc = frappe.new_doc("File")
             file_doc.file_name = os.path.basename(full_path)
@@ -500,9 +534,57 @@ def _process_orphan_batch(batch, is_private):
             file_doc.folder = "Home"
             file_doc.flags.skip_s3_upload = True
             file_doc.insert(ignore_permissions=True)
+            frappe.db.commit()
             adopted += 1
         except Exception:
             failed_urls.append(file_url)
+            continue
+
+        # --- Step 2: Upload to S3 (same flow as _upload_single_file) ---
+        # On failure the File doc is already committed; the hourly
+        # upload_pending_files scheduler will retry.
+        try:
+            # Content-hash dedup: reuse S3 key if identical file already on S3
+            if file_doc.content_hash:
+                existing_s3 = frappe.db.get_value(
+                    "File",
+                    {"content_hash": file_doc.content_hash, "is_on_s3": 1, "name": ["!=", file_doc.name]},
+                    ["s3_key", "s3_uploaded_at"],
+                    as_dict=True,
+                )
+                if existing_s3:
+                    _mark_dedup_file_as_s3(
+                        file_doc, s3_key=existing_s3.s3_key, uploaded_at=existing_s3.s3_uploaded_at
+                    )
+                    frappe.db.commit()
+                    continue
+
+            s3_key = s3_client.upload_file(file_doc)
+            frappe.db.set_value(
+                "File",
+                file_doc.name,
+                {
+                    "s3_key": s3_key,
+                    "is_on_s3": 1,
+                    "s3_uploaded_at": now_datetime(),
+                },
+                update_modified=False,
+            )
+            frappe.db.commit()
+
+            if settings.delete_local_after_upload and os.path.exists(full_path):
+                old_url = file_doc.file_url
+                file_doc._delete_file_on_disk()
+                if not os.path.exists(full_path):
+                    s3_file_url = get_s3_file_url(s3_key, file_doc.file_name)
+                    frappe.db.set_value("File", file_doc.name, {
+                        "local_deleted": 1,
+                        "file_url": s3_file_url,
+                    }, update_modified=False)
+                    _update_parent_attach_field(file_doc, old_url, s3_file_url)
+                frappe.db.commit()
+        except Exception:
+            pass
 
     if failed_urls:
         frappe.log_error(

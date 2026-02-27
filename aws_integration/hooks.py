@@ -162,7 +162,8 @@ scheduler_events = {
 		"aws_integration.s3.scheduler.upload_pending_files"
 	],
 	"daily": [
-		"aws_integration.s3.backup.take_backups_daily"
+		"aws_integration.s3.backup.take_backups_daily",
+		"aws_integration.s3.backup.rotate_old_backups_daily"
 	],
 	"weekly_long": [
 		"aws_integration.s3.backup.take_backups_weekly"

@@ -171,6 +171,7 @@ class AWSSettings(Document):
             ("aws_integration.s3.backup.take_backups_daily", self.enable_s3_backups),
             ("aws_integration.s3.backup.take_backups_weekly", self.enable_s3_backups),
             ("aws_integration.s3.backup.take_backups_monthly", self.enable_s3_backups),
+            ("aws_integration.s3.backup.rotate_old_backups_daily", self.enable_s3_backups),
         ]
         for method, enable in methods:
             self._toggle_scheduled_job(method, enable)

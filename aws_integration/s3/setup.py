@@ -21,11 +21,18 @@ def after_migrate():
                 "read_only": 1,
                 "no_copy": 1,
             },
+            # Row 2: status fields in two columns
+            {
+                "fieldname": "s3_status_section",
+                "fieldtype": "Section Break",
+                "insert_after": "s3_key",
+                "hide_border": 1,
+            },
             {
                 "fieldname": "is_on_s3",
                 "fieldtype": "Check",
                 "label": "Uploaded to S3",
-                "insert_after": "s3_key",
+                "insert_after": "s3_status_section",
                 "read_only": 1,
                 "default": "0",
                 "no_copy": 1,
@@ -39,10 +46,15 @@ def after_migrate():
                 "no_copy": 1,
             },
             {
+                "fieldname": "s3_col_break",
+                "fieldtype": "Column Break",
+                "insert_after": "s3_uploaded_at",
+            },
+            {
                 "fieldname": "local_deleted",
                 "fieldtype": "Check",
                 "label": "Local File Deleted",
-                "insert_after": "s3_uploaded_at",
+                "insert_after": "s3_col_break",
                 "read_only": 1,
                 "default": "0",
                 "no_copy": 1,

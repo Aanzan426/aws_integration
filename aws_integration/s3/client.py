@@ -169,8 +169,13 @@ class S3Client:
         }
 
         if file_name:
-            safe_name = file_name.replace('"', '\\"')
-            params["ResponseContentDisposition"] = f'inline; filename="{safe_name}"'
+            from urllib.parse import quote
+
+            ascii_name = file_name.encode("ascii", "replace").decode().replace('"', "'")
+            encoded_name = quote(file_name, safe="")
+            params["ResponseContentDisposition"] = (
+                f"inline; filename=\"{ascii_name}\"; filename*=UTF-8''{encoded_name}"
+            )
 
         return self.client.generate_presigned_url(
             "get_object",

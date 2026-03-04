@@ -11,6 +11,7 @@ class AWSSettings(Document):
 
     def before_save(self):
         self.handle_email_flush()
+        self.handle_backup_scheduler()
         self._warn_on_s3_disable()
 
     def _warn_on_s3_disable(self):
@@ -153,31 +154,50 @@ class AWSSettings(Document):
         ses_log.insert(ignore_permissions=True)
 
 
+    def handle_backup_scheduler(self):
+        """Toggle backup scheduled jobs based on enable_s3_backups setting.
+
+        When our S3 backups are enabled:
+          - Stop Frappe's built-in S3 backup jobs (avoid duplicate backups)
+          - Enable our own backup jobs
+        When disabled:
+          - Re-enable Frappe's built-in S3 backup jobs
+          - Stop our own backup jobs
+        """
+        methods = [
+            ("frappe.integrations.doctype.s3_backup_settings.s3_backup_settings.take_backups_daily", not self.enable_s3_backups),
+            ("frappe.integrations.doctype.s3_backup_settings.s3_backup_settings.take_backups_weekly", not self.enable_s3_backups),
+            ("frappe.integrations.doctype.s3_backup_settings.s3_backup_settings.take_backups_monthly", not self.enable_s3_backups),
+            ("aws_integration.s3.backup.take_backups_daily", self.enable_s3_backups),
+            ("aws_integration.s3.backup.take_backups_weekly", self.enable_s3_backups),
+            ("aws_integration.s3.backup.take_backups_monthly", self.enable_s3_backups),
+            ("aws_integration.s3.backup.rotate_old_backups_daily", self.enable_s3_backups),
+        ]
+        for method, enable in methods:
+            self._toggle_scheduled_job(method, enable)
+
     def handle_email_flush(self):
         methods = [
             ("frappe.email.queue.flush", not self.enable_aws),
-            ("aws_integration.utils.email.flush_email_queue", self.enable_aws)
+            ("aws_integration.utils.email.flush_email_queue", self.enable_aws),
         ]
-        
         for method, enable in methods:
-            self.email_flush_handler(method, enable)
-    
+            self._toggle_scheduled_job(method, enable)
+
     def test_s3_connection(self):
         """Test S3 bucket connectivity."""
         from aws_integration.s3.client import S3Client
         client = S3Client()
         return client.test_connection()
 
-    def email_flush_handler(self, method_name, enable=True):
-        """
-        Enable or disable the email flush job.
-        """
+    def _toggle_scheduled_job(self, method_name, enable=True):
+        """Enable or disable a Scheduled Job Type by its method path."""
         try:
             job = frappe.get_doc("Scheduled Job Type", {"method": method_name})
             job.stopped = not enable
             job.save()
         except frappe.DoesNotExistError:
             frappe.log_error(
-                f"Failed to disable {method_name} job. Please disable it manually.",
+                f"Scheduled Job Type for {method_name} not found. Please toggle it manually.",
                 frappe.get_traceback(),
             )

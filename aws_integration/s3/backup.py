@@ -129,6 +129,7 @@ def upload_local_backups():
 			"status": "Queued",
 		})
 		log.name = log_name
+		log.flags.name_set = True
 		log.local_backup_paths = json.dumps(backup_paths)
 		log.insert(ignore_permissions=True)
 		frappe.db.commit()
@@ -349,7 +350,7 @@ def _run_backup(log_name, retry_count=0, triggered_by="Administrator"):
 	except Exception:
 		frappe.log_error(
 			title="S3 Backup Rotation Error",
-			message=traceback.format_exc(),
+			message=frappe.get_traceback(),
 		)
 
 
@@ -502,26 +503,56 @@ def _send_notification(email, log, success=True):
 			message=message,
 		)
 	except Exception:
-		frappe.log_error(title="S3 Backup Email Failed", message=traceback.format_exc())
+		frappe.log_error(title="S3 Backup Email Failed", message=frappe.get_traceback())
+
+
+def rotate_old_backups_daily():
+	"""Scheduler job: rotate old S3 backups based on retention settings."""
+	settings = frappe.get_cached_doc("AWS Settings")
+	if not settings.enable_s3_backups:
+		return
+	if not settings.enable_aws or not settings.enable_s3:
+		return
+
+	s3_client = _get_s3_client(settings)
+
+	try:
+		_rotate_old_backups(s3_client, settings)
+	except Exception:
+		frappe.log_error(
+			title="S3 Backup Rotation Error",
+			message=frappe.get_traceback(),
+		)
 
 
 def _rotate_old_backups(s3_client, settings, exclude_log=None):
-	"""Delete old backups from S3 based on retention settings."""
+	"""Delete old backups from S3 based on retention settings.
+
+	Always preserves the latest successful backup to prevent accidental
+	deletion of all backups (e.g. when retention_days is very short).
+	"""
 	retention_count = settings.s3_backup_retention_count or 0
 	retention_days = settings.s3_backup_retention_days or 0
 
 	if not retention_count and not retention_days:
 		return
 
+	all_logs = frappe.get_all(
+		"S3 Backup Log",
+		filters={"status": "Success"},
+		fields=["name"],
+		order_by="creation desc",
+	)
+
+	if not all_logs:
+		return
+
+	# Always protect the latest successful backup
+	latest_log = all_logs[0].name
+
 	logs_to_delete = set()
 
 	if retention_count > 0:
-		all_logs = frappe.get_all(
-			"S3 Backup Log",
-			filters={"status": "Success"},
-			fields=["name"],
-			order_by="creation desc",
-		)
 		if len(all_logs) > retention_count:
 			for entry in all_logs[retention_count:]:
 				logs_to_delete.add(entry.name)
@@ -537,6 +568,8 @@ def _rotate_old_backups(s3_client, settings, exclude_log=None):
 		for entry in old_logs:
 			logs_to_delete.add(entry.name)
 
+	# Never delete the latest backup or the explicitly excluded one
+	logs_to_delete.discard(latest_log)
 	if exclude_log:
 		logs_to_delete.discard(exclude_log)
 
@@ -549,7 +582,7 @@ def _rotate_old_backups(s3_client, settings, exclude_log=None):
 		except Exception:
 			frappe.log_error(
 				title=f"S3 Backup Rotation Failed: {log_name}",
-				message=traceback.format_exc(),
+				message=frappe.get_traceback(),
 			)
 
 

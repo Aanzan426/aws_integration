@@ -88,6 +88,7 @@ frappe.ui.form.on("AWS Settings", {
                             let s_exempt = cint(d.exempt);
                             let s_total = cint(d.total_files);
                             let s_errors = cint(d.recent_errors);
+                            let s_skipped = cint(d.recent_skipped);
                             let pct = s_total
                                 ? ((s_on_s3 / s_total) * 100).toFixed(1)
                                 : 0;
@@ -133,6 +134,9 @@ frappe.ui.form.on("AWS Settings", {
                                     ${last_upload_str}
                                     ${s_errors
                                         ? ' &middot; <span style="color:var(--red-500);">' + __("{0} errors in last 7 days", [s_errors]) + '</span>'
+                                        : ''}
+                                    ${s_skipped
+                                        ? ' &middot; <span style="color:var(--orange-500);">' + __("{0} files skipped (not found on disk)", [s_skipped]) + '</span>'
                                         : ''}
                                 </div>
                             `;
@@ -180,6 +184,38 @@ frappe.ui.form.on("AWS Settings", {
                 __("S3 Files")
             );
 
+            frm.add_custom_button(
+                __("Adopt Orphaned Files"),
+                function () {
+                    frappe.confirm(
+                        __(
+                            "This will scan public/files and private/files for files not tracked by any File document, "
+                            + "create File records for them, and queue them for S3 upload. Continue?"
+                        ),
+                        function () {
+                            frappe.call({
+                                method: "aws_integration.api.s3.adopt_orphaned_files",
+                                freeze: true,
+                                freeze_message: __("Scanning for orphaned files..."),
+                                callback: function (r) {
+                                    if (r.message) {
+                                        frappe.msgprint(r.message);
+                                    }
+                                },
+                                error: function () {
+                                    frappe.msgprint({
+                                        title: __("Error"),
+                                        indicator: "red",
+                                        message: __("Failed to scan for orphaned files."),
+                                    });
+                                },
+                            });
+                        }
+                    );
+                },
+                __("S3 Files")
+            );
+
         }
 
         if (frm.doc.enable_s3_backups) {
@@ -198,6 +234,7 @@ frappe.ui.form.on("AWS Settings", {
                                         frm._s3_queued_logs = [r.message.log_name];
                                         frm._s3_total_count = 1;
                                         frm._s3_completed_count = 0;
+                                        frm._s3_upload_only = false;
                                         frm._s3_active_stage = "queued";
                                         render_backup_status_card(frm, {
                                             name: r.message.log_name,
@@ -234,6 +271,7 @@ frappe.ui.form.on("AWS Settings", {
                                         frm._s3_queued_logs = r.message.queued || [];
                                         frm._s3_total_count = r.message.count || 0;
                                         frm._s3_completed_count = 0;
+                                        frm._s3_upload_only = true;
                                         frm._s3_active_stage = "queued";
                                         frappe.msgprint({
                                             title: __("Local Backups Queued"),
@@ -305,6 +343,27 @@ frappe.ui.form.on("AWS Settings", {
                 });
             });
 
+            frappe.realtime.off("s3_orphan_progress");
+            frappe.realtime.on("s3_orphan_progress", function (data) {
+                frappe.show_alert(
+                    __("{0} orphaned files adopted, {1} errors so far...", [
+                        data.adopted, data.errors
+                    ]),
+                    5
+                );
+            });
+
+            frappe.realtime.off("s3_orphan_complete");
+            frappe.realtime.on("s3_orphan_complete", function (data) {
+                frappe.msgprint({
+                    title: __("Orphan Adoption Complete"),
+                    indicator: data.errors ? "orange" : "green",
+                    message: __("{0} orphaned files adopted, {1} errors", [
+                        data.adopted, data.errors
+                    ]),
+                });
+            });
+
             frappe.realtime.off("s3_backup_progress");
             frappe.realtime.on("s3_backup_progress", function (data) {
                 // Ignore events not belonging to our tracked batch
@@ -338,6 +397,7 @@ frappe.ui.form.on("AWS Settings", {
                         frm._s3_queued_logs = [];
                         frm._s3_total_count = 0;
                         frm._s3_completed_count = 0;
+                        frm._s3_upload_only = false;
                         frm._s3_active_stage = null;
                         fetch_and_render_backup_card(frm);
                     }
@@ -350,6 +410,7 @@ frappe.ui.form.on("AWS Settings", {
 // ── Backup Status Card helpers ──
 
 const STAGES = ["queued", "generating", "uploading", "done"];
+const STAGES_UPLOAD = ["queued", "uploading", "done"];
 
 const STAGE_LABELS = {
     queued: __("Queued"),
@@ -462,7 +523,8 @@ function render_backup_status_card(frm, log, stage, batch_info) {
     let is_failed = log.status === "Failed";
     if (!stage) stage = map_log_status_to_stage(log.status);
 
-    let pipeline_html = build_stage_pipeline(stage, is_failed);
+    let stages = frm._s3_upload_only ? STAGES_UPLOAD : STAGES;
+    let pipeline_html = build_stage_pipeline(stage, is_failed, stages);
     let summary_html = build_summary(log, batch_info);
 
     wrapper.$wrapper.html(`
@@ -497,12 +559,13 @@ function render_backup_status_card(frm, log, stage, batch_info) {
     `);
 }
 
-function build_stage_pipeline(active_stage, is_failed) {
-    let active_idx = STAGES.indexOf(active_stage);
+function build_stage_pipeline(active_stage, is_failed, stages) {
+    if (!stages) stages = STAGES;
+    let active_idx = stages.indexOf(active_stage);
     // For "failed", mark up to the last reached stage
     let failed_stage = null;
     if (is_failed) {
-        // If active_stage is "failed" (not in STAGES), determine from context
+        // If active_stage is "failed" (not in stages), determine from context
         if (active_idx === -1) {
             // Unknown stage — mark the first stage as failed
             active_idx = 0;
@@ -510,7 +573,7 @@ function build_stage_pipeline(active_stage, is_failed) {
         failed_stage = active_idx;
     }
 
-    let items = STAGES.map(function (stage, idx) {
+    let items = stages.map(function (stage, idx) {
         let dot_style, label_style, css_class;
 
         if (is_failed && idx === failed_stage) {
@@ -644,5 +707,6 @@ function update_stage_pipeline(frm, stage) {
         return;
     }
 
-    pipeline_el.html(build_stage_pipeline(stage, false));
+    let stages = frm._s3_upload_only ? STAGES_UPLOAD : STAGES;
+    pipeline_el.html(build_stage_pipeline(stage, false, stages));
 }

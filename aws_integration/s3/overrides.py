@@ -1,7 +1,6 @@
 from frappe.core.doctype.file.file import File
 
-
-S3_API_PREFIX = "/api/method/aws_integration.api.s3.generate_file"
+from aws_integration.s3 import S3_API_PREFIX
 
 
 class S3File(File):

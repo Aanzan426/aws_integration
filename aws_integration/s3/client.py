@@ -17,27 +17,25 @@ class S3Client:
             frappe.throw(_("S3 is not enabled in AWS Settings"))
 
         # Prefer S3-specific credentials if present, otherwise fall back to AWS credentials
-        aws_access_key = (
-            self.settings.s3_access_key_id
-        )
-
-    	aws_secret_key = (
+        access_key = self.settings.s3_access_key_id or self.settings.aws_access_key_id
+        secret_key = (
             self.settings.get_password("s3_secret_access_key")
+            or self.settings.get_password("aws_secret_access_key")
         )
 
         client_kwargs = {
-            "region_name": self.settings.s3_bucket_region,
-            "aws_access_key_id": aws_access_key,
-            "aws_secret_access_key": aws_secret_key,
-    	}
+            "region_name": self.settings.s3_bucket_region or self.settings.region,
+            "aws_access_key_id": access_key,
+            "aws_secret_access_key": secret_key,
+        }
 
         if self.settings.s3_endpoint_url:
             client_kwargs["endpoint_url"] = self.settings.s3_endpoint_url
 
-    	self.client = boto3.client("s3", **client_kwargs)
+        self.client = boto3.client("s3", **client_kwargs)
 
-    	self.bucket = self.settings.s3_bucket_name
-    	self.prefix = self.settings.s3_folder_prefix or frappe.local.site
+        self.bucket = self.settings.s3_bucket_name
+        self.prefix = self.settings.s3_folder_prefix or frappe.local.site
 
     def get_s3_key(self, file_doc):
         """Generate S3 key mirroring Frappe's folder structure.

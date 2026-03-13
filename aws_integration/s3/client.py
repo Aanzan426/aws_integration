@@ -12,20 +12,32 @@ class S3Client:
 
     def __init__(self):
         self.settings = frappe.get_cached_doc("AWS Settings")
+
         if not self.settings.enable_aws or not self.settings.enable_s3:
             frappe.throw(_("S3 is not enabled in AWS Settings"))
 
+        # Prefer S3-specific credentials if present, otherwise fall back to AWS credentials
+        aws_access_key = (
+            self.settings.s3_access_key_id
+        )
+
+    	aws_secret_key = (
+            self.settings.get_password("s3_secret_access_key")
+        )
+
         client_kwargs = {
-            "region_name": self.settings.s3_bucket_region or self.settings.region,
-            "aws_access_key_id": self.settings.aws_access_key_id,
-            "aws_secret_access_key": self.settings.get_password("aws_secret_access_key"),
-        }
+            "region_name": self.settings.s3_bucket_region,
+            "aws_access_key_id": aws_access_key,
+            "aws_secret_access_key": aws_secret_key,
+    	}
+
         if self.settings.s3_endpoint_url:
             client_kwargs["endpoint_url"] = self.settings.s3_endpoint_url
 
-        self.client = boto3.client("s3", **client_kwargs)
-        self.bucket = self.settings.s3_bucket_name
-        self.prefix = self.settings.s3_folder_prefix or frappe.local.site
+    	self.client = boto3.client("s3", **client_kwargs)
+
+    	self.bucket = self.settings.s3_bucket_name
+    	self.prefix = self.settings.s3_folder_prefix or frappe.local.site
 
     def get_s3_key(self, file_doc):
         """Generate S3 key mirroring Frappe's folder structure.
@@ -94,7 +106,10 @@ class S3Client:
         Returns:
             str: Full S3 key including prefix
         """
-        return f"{self.prefix}/{key}" if self.prefix else key
+        if self.prefix:
+    	    prefix = self.prefix.strip("/")
+            return f"{prefix}/{key}"
+	return key
 
     def upload_file(self, file_doc):
         """Upload a file to S3.

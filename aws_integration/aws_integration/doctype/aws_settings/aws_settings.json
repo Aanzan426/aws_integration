@@ -21,6 +21,10 @@
   "column_break_kjvj",
   "sender_name",
   "email_batch_size",
+  "email_governance_section",
+  "ses_transactional_configuration_set",
+  "column_break_eg1",
+  "ses_promotional_configuration_set",
   "tab_break_s3",
   "s3_settings_section",
   "s3_endpoint_url",
@@ -128,6 +132,27 @@
    "fieldname": "email_batch_size",
    "fieldtype": "Int",
    "label": "Email Batch Size"
+  },
+  {
+   "fieldname": "email_governance_section",
+   "fieldtype": "Section Break",
+   "label": "Email Governance (SES Configuration Sets)"
+  },
+  {
+   "description": "SES configuration set name applied to transactional mail (OTP, password reset, receipts, and any send not explicitly marked promotional=True). Leave blank to skip the X-SES-Configuration-Set header for transactional sends. Fill in the actual configuration set name provisioned on the AWS side — not hard-coded here.",
+   "fieldname": "ses_transactional_configuration_set",
+   "fieldtype": "Data",
+   "label": "Transactional Configuration Set"
+  },
+  {
+   "fieldname": "column_break_eg1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "SES configuration set name applied to mail explicitly marked promotional=True via aws_integration.utils.email.sendmail()/send_email_in_batches(). Leave blank to skip the X-SES-Configuration-Set header for promotional sends. Fill in the actual configuration set name provisioned on the AWS side — not hard-coded here.",
+   "fieldname": "ses_promotional_configuration_set",
+   "fieldtype": "Data",
+   "label": "Promotional Configuration Set"
   },
   {
    "depends_on": "enable_s3",

@@ -85,16 +85,38 @@ class AWSSettings(Document):
         reply_tos=None,
     ):
         """
-        Sends emails in batches with a rate limit of 25 per second.
+        DEPRECATED (transport consolidation, Part 1 — see
+        aws_integration/utils/email.py:sendmail() for the full rationale).
 
-        :param destinations: List of destinations (objects with `to_service_format` method).
-        :param subject: Email subject.
-        :param text: Plain text body (optional).
-        :param html: HTML body (optional).
-        :param reply_tos: List of reply-to addresses (optional).
-        :param batch_size: Number of recipients per batch (default: 25).
-        :return: List of message IDs or None for failed attempts.
+        This method built and fired a raw boto3 ``sesv2.send_email()`` call
+        directly, completely bypassing Frappe's Email Queue, its MIME
+        builder, and every core email hook — including sending a single-part
+        body (Text *or* Html, never both, per the old caller's ``is_html()``
+        branch) instead of a correct multipart/alternative message.
+
+        As of this change, ``aws_integration.utils.email.sendmail()`` (the
+        only in-app caller) no longer calls this method — it calls Frappe
+        core's ``frappe.sendmail()`` instead. A repo-wide grep at the time of
+        this change found no other callers anywhere in the bench (it is not
+        ``@frappe.whitelist()``-decorated, so it was never reachable from the
+        client side either), so this is genuinely dead code now.
+
+        We deprecate loudly rather than delete outright: deleting removes a
+        method someone could plausibly search for and reintroduce the exact
+        Route-B bug this change fixes; a loud guard makes that a deliberate,
+        visible decision instead of a silent one. If a future audit confirms
+        this is still unused, it can be deleted then.
         """
+        frappe.throw(
+            _(
+                "AWSSettings.send_email() is deprecated and must not be called directly. "
+                "It builds a raw boto3 SES call that bypasses Frappe's Email Queue and "
+                "MIME builder (this is exactly the bug the transport-consolidation change "
+                "fixed). Use aws_integration.utils.email.sendmail() / "
+                "send_email_in_batches() instead, which route through core "
+                "frappe.sendmail()."
+            )
+        )
         self.source = f"{self.sender_name} <{self.source_email}>"
         self.ses_client = self.get_ses_client()
         send_args = {

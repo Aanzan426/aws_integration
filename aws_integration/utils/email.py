@@ -1,6 +1,7 @@
 import re
 import time
 import frappe
+from email.utils import parseaddr
 from frappe import _, cint, msgprint
 from itertools import islice
 
@@ -10,10 +11,25 @@ from frappe.email.queue import (
     get_queue,
 )
 from frappe.utils import now_datetime
+from frappe.utils import validate_email_address as _frappe_validate_email_address
+
+from aws_integration.utils.email_headers import mark_promotional_headers
 
 
 class SESDestination:
-    """Contains data about an email destination."""
+    """Contains data about an email destination.
+
+    NOTE (transport consolidation, Part 1): no longer used internally by
+    ``sendmail()`` — that function now builds recipient/cc/bcc as plain
+    lists for ``frappe.sendmail()`` instead of a boto3 SES ``Destination``
+    payload. Kept in place only because it is part of this module's public
+    surface (``aws_integration/utils/__init__.py`` does
+    ``from aws_integration.utils.email import *``) and nothing in this bench
+    was found to import it directly (checked via repo-wide grep), so
+    removing it is a judgment call rather than a hard requirement. If a
+    future audit confirms no external references, this class can be
+    deleted.
+    """
 
     def __init__(self, tos, ccs=None, bccs=None):
         self.tos = tos
@@ -30,13 +46,58 @@ class SESDestination:
 
 
 def validate_email(email):
-    """Regular expression to validate email addresses."""
-    email_pattern = re.compile(r"[^@]+@[^@]+\.[^@]+")
-    return bool(email_pattern.match(email))
+    """Validate a single email address.
+
+    ISS-28: previously a hand-rolled regex (``[^@]+@[^@]+\\.[^@]+``) that
+    both under- and over-accepted addresses (e.g. it happily matched
+    ``"a@b@c.d"`` and rejected some valid-but-unusual addresses). This now
+    delegates to Frappe core's own ``frappe.utils.validate_email_address``
+    — the same validator that core ``frappe.sendmail()`` / the Email Queue
+    apply when the message is actually built and sent, so an address that
+    passes here is guaranteed to also be accepted downstream.
+
+    REGRESSION FIX (post-review, round 2): core's ``validate_email_address``
+    parses its input with ``email.utils.parseaddr`` under the hood, which is
+    deliberately lenient about *header-style* input (e.g. picking one address
+    out of ``"Name <a@b>, other@x"``). For a single malformed multi-``@``
+    address like ``"a@b@c.com"`` — or even the bracketed
+    ``"Name <a@b@c.com>"`` — this leniency means core happily truncates it to
+    a syntactically-valid tail (``"b@c.com"``) and returns that as truthy,
+    instead of rejecting the malformed input outright. The OLD hand-rolled
+    regex correctly rejected these. We do NOT want to revert to a hand-rolled
+    regex (that duplicated validation logic is exactly ISS-28's original
+    complaint) — instead we add one narrow, idiomatic guard in front of core:
+    reject up front when ``email.utils.parseaddr`` (the same stdlib parser
+    core itself uses) cannot extract a usable address from the string at all.
+    Empirically this is precisely what happens for every multi-``@``
+    malformed variant we tried (``"a@b@c.com"``, ``"Name <a@b@c.com>"``,
+    ``"<a@b@c.com>"``, ``"user@"``) — ``parseaddr`` returns an empty address
+    part for all of them — while every legitimate address (plain, plus-tagged,
+    quoted-local-part, or ``"Name <addr>"`` form) still parses to a non-empty
+    address and falls through to core's validator unchanged. So this guard
+    only removes cases core would have mishandled; it changes nothing for
+    every input the old test suite already exercised as valid or invalid.
+
+    Signature (single string in, bool out) is unchanged so every existing
+    caller (AWS Settings.validate(), this module) needs no changes.
+    """
+    if not email:
+        return False
+    _, addr = parseaddr(email)
+    if not addr:
+        return False
+    return bool(_frappe_validate_email_address(email, throw=False))
 
 
 def is_html(text):
-    """Regular expression to check for HTML tags"""
+    """Regular expression to check for HTML tags.
+
+    No longer used internally by ``sendmail()`` (frappe.sendmail()/its MIME
+    builder decides HTML-vs-text handling itself — see the docstring on
+    ``sendmail()`` for why that is actually the fix for a real bug in the
+    old boto3 path). Kept for backward compatibility of this module's
+    public import surface.
+    """
     html_pattern = re.compile(r"<([a-zA-Z]+)[^>]*>(.*?)</\1>|<([a-zA-Z]+)[^>]*>")
     return bool(html_pattern.search(text))
 
@@ -48,25 +109,247 @@ def chunk(iterable, size):
         yield [first, *islice(iterator, size - 1)]
 
 
-def sendmail(subject, message, recepient, cc_recepient, bcc_recepient, reply_tos=None):
-    email_sender = frappe.get_single("AWS Settings")
-    destinations = SESDestination(tos=recepient, ccs=cc_recepient, bccs=bcc_recepient)
+def _as_address_list(value):
+    """Coerce a recipient-ish argument (None / str / list / tuple) into a
+    clean list of non-empty address strings.
 
-    email_params = {
-        "destinations": destinations,
-        "subject": subject,
-        "reply_tos": reply_tos,
-    }
-
-    if is_html(message):
-        email_params["html"] = message
-    else:
-        email_params["content"] = message
-
-    return email_sender.send_email(**email_params)
+    Every existing caller passes either ``None``, a single string, or a
+    list of strings for recepient/cc_recepient/bcc_recepient/reply_tos —
+    this normalizes all three shapes so downstream code has one thing to
+    deal with.
+    """
+    if not value:
+        return []
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    return [v for v in value if v]
 
 
-def send_email_in_batches(data):
+def _record_ses_log(subject, message, sender, recipients, cc, bcc, status):
+    """Write an "AWS SES Logs" record for one send attempt.
+
+    OBSERVABILITY FIX (post-review, round 2): the old ``AWS Settings.send_email()``
+    (Route B, now dead — it throws immediately) called
+    ``AWS Settings.add_ses_logs()`` after every successful boto3 send. Nothing
+    in the new ``sendmail()`` (Route A, enqueue-through-core) replaced that
+    call, so "AWS SES Logs" silently stopped being populated. Two things in
+    this bench depend on that doctype carrying real rows:
+      - edu_quality's ``permission_import.py`` ships permission rules scoped
+        to "AWS SES Logs" as a Reference Document Type — a doctype nobody
+        ever writes to makes those permission rows dead weight and (for
+        anyone actually relying on the log for support/debugging) hides
+        real send activity behind an always-empty list view.
+      - unity_dev_tools's PII-anonymization tooling (``anonymize_core.py``)
+        truncates "tabAWS SES Logs" as one of its integration-payload tables,
+        on the explicit assumption that production sites accumulate real
+        rows there that need scrubbing.
+    This restores that population, using the doctype's existing fields only
+    (no schema change) — same field set the old ``add_ses_logs()`` wrote to
+    (from/subject/message/status/recepients/cc_recepients/bcc_recepients).
+    ``message_id`` is intentionally left blank: Route A enqueues into the
+    Email Queue (``delayed=True``) and does not hand back a provider message
+    id synchronously the way the old direct boto3 call did, so there is
+    nothing genuine to put there.
+
+    DECISION — log failures too, not just successes (unlike the old code,
+    which only ever logged after a *successful* boto3 send and never wrote a
+    row for a failure): ``send_email_in_batches()`` deliberately swallows
+    individual send failures per-item (frappe.log_error only, no doctype
+    trace) so one bad row doesn't abort a batch. Without a log entry here,
+    those swallowed failures leave literally no trace in "AWS SES Logs" for
+    someone auditing "did this notice go out" — only in the generic Error
+    Log, keyed by traceback rather than by recipient/subject. Logging the
+    failed attempt too (status "Not Sent", reusing the doctype's existing
+    Select options instead of inventing a new status) makes this an
+    observability improvement over the old behavior, not just parity, at no
+    schema cost. This never raises itself — a logging failure must never mask
+    or replace the real send outcome for the caller.
+    """
+    try:
+        log = frappe.get_doc(
+            {
+                "doctype": "AWS SES Logs",
+                "subject": subject,
+                "message": message,
+                "status": status,
+                "from": sender,
+            }
+        )
+        log.recepients = ", ".join(recipients or [])
+        log.cc_recepients = ", ".join(cc or [])
+        log.bcc_recepients = ", ".join(bcc or [])
+        log.insert(ignore_permissions=True)
+    except Exception:
+        frappe.log_error(
+            title=_("AWS Integration: failed to write AWS SES Logs record"),
+            message=frappe.get_traceback(),
+        )
+
+
+def sendmail(
+    subject,
+    message,
+    recepient,
+    cc_recepient,
+    bcc_recepient,
+    reply_tos=None,
+    promotional=False,
+    reference_doctype=None,
+    reference_name=None,
+):
+    """Send a single email.
+
+    PART 2 ADDITION — email-governance-engine header injection
+    -------------------------------------------------------------
+    ``promotional`` (default ``False``, i.e. safe/opt-in — see
+    ``aws_integration/utils/email_headers.py`` module docstring for why
+    this MUST default to False and never be inferred) marks this specific
+    send as promotional. When True, the ``make_email_body_message`` hook
+    (``aws_integration.utils.email_headers.inject_governance_headers``)
+    injects a ``List-Unsubscribe`` header onto the built message — never
+    otherwise, and never for OTP/password-reset/any other mail that
+    doesn't explicitly opt in here.
+
+    ``reference_doctype``/``reference_name`` are optional and only matter
+    when ``promotional=True``: if given, they let the hook build a working
+    ``https:`` List-Unsubscribe link via core's existing (GET-only, see
+    module docstring "DEFERRED" section) unsubscribe endpoint, which
+    requires a doctype+name to record the opt-out against. If omitted, the
+    hook still adds a ``mailto:`` fallback, just not the ``https:`` form.
+    These are NOT passed through to ``frappe.sendmail()``'s own
+    ``reference_doctype``/``reference_name`` params (core's built-in
+    unsubscribe-link-in-footer mechanism is a separate, orthogonal feature
+    from this header-injection mechanism — deliberately left untouched
+    here) — they are threaded only as marker headers for this hook to read.
+
+    SCOPE NOTE: no real caller in this bench passes ``promotional=True``
+    yet. This adds the CAPABILITY only — activating it on a real send (e.g.
+    edu_quality/unity_parent_app School Notice) is out of this change's
+    authorization; see the PROPOSER report for Part 2.
+
+    TRANSPORT CONSOLIDATION (Part 1) — Route B -> Route A
+    -------------------------------------------------------
+    This used to build a raw boto3 ``sesv2.send_email()`` call via
+    ``AWS Settings.send_email()`` ("Route B"), completely bypassing
+    Frappe's Email Queue, its MIME builder, and every core email hook.
+    It now enqueues through core ``frappe.sendmail()`` ("Route A"), which
+    is what every other Frappe/Unity email already goes through.
+
+    WHY this is a real fix, not just a refactor: Route B's hand-rolled SES
+    "Simple" payload put the body under *either* ``Content.Simple.Body.Text``
+    *or* ``Content.Simple.Body.Html`` (see the old ``is_html()`` branch) —
+    never both. SES therefore sent a single-part message instead of a
+    correct ``multipart/alternative`` (html + plain-text fallback). Core
+    Frappe's MIME builder (``frappe/email/email_body.py``) already handles
+    this correctly for every other send path in the framework, so folding
+    this into Route A makes the multipart/alternative problem moot without
+    any extra code here. It also means ``make_email_body_message`` and any
+    other core email hooks now fire for these sends too — previously they
+    never did, because Route B never touched core's email pipeline at all.
+
+    Actual delivery (which transport moves mail out of the Email Queue, and
+    at what pace) is decided downstream, by the *existing*
+    ``AWSSettings.handle_email_flush()`` toggle:
+      - ``enable_aws`` on  -> queue flushed by
+        ``aws_integration.utils.email.flush_email_queue`` (rate-paced)
+      - ``enable_aws`` off -> queue flushed by Frappe's own
+        ``frappe.email.queue.flush``
+    This function does not need to know or care which one is active; it
+    only builds and enqueues the message. That toggle is untouched by this
+    change.
+
+    Signature is backward compatible with the pre-existing implementation
+    (``subject, message, recepient, cc_recepient, bcc_recepient,
+    reply_tos=None``) — every existing caller (edu_quality's
+    ``walsh/admin.py`` School Notice code, unity_parent_app's
+    ``api/admin.py`` School Notice code) needs zero changes; Part 2 only
+    appends new optional, safely-defaulted keyword arguments
+    (``promotional``, ``reference_doctype``, ``reference_name``) after the
+    Part 1 signature.
+
+    Known behavior differences from Route B (see PROPOSER report for full
+    discussion):
+      - Reply-To: Route B accepted a *list* of reply-to addresses
+        (``ReplyToAddresses``). Core ``frappe.sendmail()`` only supports a
+        single Reply-To string. If more than one is given here, we use the
+        first and log the rest being dropped — no existing caller passes
+        more than one today (confirmed by repo-wide grep), so this is a
+        latent-only difference.
+      - Failure semantics: Route B's boto3 call happened synchronously and
+        any exception was caught-and-logged inside
+        ``AWS Settings.send_email()`` (it never raised to the caller).
+        Route A is enqueue-only here (``delayed=True``); actual delivery
+        failures now surface later, per-item, during queue flush (see
+        ``flush_email_queue``), which already has its own try/except and
+        error logging. What *does* raise synchronously now is input
+        validation (missing recipient, invalid address) — deliberately,
+        since silently dropping a bad send was arguably the original bug.
+        ``send_email_in_batches()`` below wraps each item in try/except so
+        one bad address cannot abort the rest of a batch, preserving the
+        fault-tolerant, "one bad row doesn't block the rest" behavior the
+        existing callers rely on.
+    """
+    recipients = _as_address_list(recepient)
+    cc = _as_address_list(cc_recepient)
+    bcc = _as_address_list(bcc_recepient)
+    reply_tos = _as_address_list(reply_tos)
+
+    if not recipients:
+        frappe.throw(_("At least one recipient email address is required to send an email."))
+
+    invalid = [addr for addr in (*recipients, *cc, *bcc) if not validate_email(addr)]
+    if invalid:
+        frappe.throw(
+            _("Cannot send email — invalid email address(es): {0}").format(", ".join(invalid))
+        )
+
+    settings = frappe.get_cached_doc("AWS Settings")
+    sender = None
+    if settings.source_email:
+        sender = (
+            f"{settings.sender_name} <{settings.source_email}>"
+            if settings.sender_name
+            else settings.source_email
+        )
+
+    reply_to = None
+    if reply_tos:
+        reply_to = reply_tos[0]
+        if len(reply_tos) > 1:
+            frappe.logger("aws_integration").info(
+                "sendmail(): multiple reply_tos %s given; core frappe.sendmail() "
+                "only supports a single Reply-To address, using %r and dropping the rest.",
+                reply_tos,
+                reply_to,
+            )
+
+    email_headers = None
+    if promotional:
+        email_headers = mark_promotional_headers(
+            reference_doctype=reference_doctype, reference_name=reference_name
+        )
+
+    try:
+        result = frappe.sendmail(
+            recipients=recipients,
+            sender=sender,
+            subject=subject,
+            message=message,
+            cc=cc,
+            bcc=bcc,
+            reply_to=reply_to,
+            delayed=True,
+            email_headers=email_headers,
+        )
+    except Exception:
+        _record_ses_log(subject, message, sender, recipients, cc, bcc, status="Not Sent")
+        raise
+
+    _record_ses_log(subject, message, sender, recipients, cc, bcc, status="Sent")
+    return result
+
+
+def send_email_in_batches(data, promotional=False, reference_doctype=None, reference_name=None):
     """
     Structure of data:
     {
@@ -76,24 +359,79 @@ def send_email_in_batches(data):
             "recepients": [],
             "cc_recepients": [],
             "bcc_recepients": [],
-            reply_tos: []
+            "reply_tos": [],
+            "promotional": False,
+            "reference_doctype": None,
+            "reference_name": None,
         }
     }
-    """
-    email_batch_size = frappe.get_value(
-        "AWS Settings", "AWS Settings", "email_batch_size"
-    )
 
-    for student_data in chunk(data.keys(), cint(email_batch_size)):
-        for key in student_data:
-            student = data[key]
-            sendmail(
-                student.get("subject"),
-                student.get("content"),
-                student.get("recepients"),
-                student.get("cc_recepients"),
-                student.get("bcc_recepients"),
-            )
+    PART 2 ADDITION — ``promotional``/``reference_doctype``/``reference_name``
+    -------------------------------------------------------------------------
+    Same meaning as on ``sendmail()`` (see its docstring) — default
+    ``promotional=False`` (safe/opt-in), threaded through to every item's
+    ``sendmail()`` call so the whole batch shares one classification. Any
+    individual item's dict may override this per-item via its own
+    ``"promotional"``/``"reference_doctype"``/``"reference_name"`` keys
+    (falls back to this function's arguments when the item omits them) —
+    useful when a single batch mixes both kinds of mail, though no existing
+    caller does this today (see SCOPE NOTE on ``sendmail()``).
+
+    Batching / rate-limiting behavior is preserved from the pre-existing
+    implementation: entries are chunked by ``AWS Settings.email_batch_size``
+    and there is a ``time.sleep(1)`` pause between chunks. We looked at two
+    unmerged prior-art branches before deciding to keep this simple:
+      - ``unity-org/ses-fix``: a Redis-backed per-second token-bucket
+        (``SESRateLimiter``).
+      - ``unity-org/feat/rate-paced-ses-batch-email``: a
+        ``ThreadPoolExecutor`` + evenly-spaced-slot pacer sending raw boto3
+        in parallel worker threads.
+    Neither was cherry-picked wholesale: both are built around firing SES
+    directly (boto3), which is exactly the Route B pattern this change
+    retires — porting either rate limiter as-is would mean re-introducing a
+    parallel, un-queued send path. A Redis- or thread-pool-based pacer for
+    the *queued* (Route A) path is a reasonable Part 2 follow-up, but is out
+    of scope for "transport consolidation."
+
+    Two deliberate behavior changes vs. the pre-existing implementation,
+    both called out here since a caller-facing docstring is the place a
+    future reader will look:
+      1. ``reply_tos`` is now actually passed through to ``sendmail()``.
+         The old code accepted a ``reply_tos`` key in the per-item dict (see
+         the structure comment above, which already documented it) but
+         never read it — a latent bug. Fixed here since it costs nothing to
+         fix and matches the documented contract.
+      2. Each item is now wrapped in its own try/except. ``sendmail()`` can
+         raise synchronously now (see its docstring) where the old boto3
+         path never did; this restores the "one bad row doesn't abort the
+         batch" behavior the callers (edu_quality / unity_parent_app School
+         Notice bulk-send loops) rely on structurally, even though none of
+         them wrap this call in a try/except themselves.
+    """
+    email_batch_size = cint(
+        frappe.get_value("AWS Settings", "AWS Settings", "email_batch_size")
+    ) or 1
+
+    for group in chunk(list(data.keys()), email_batch_size):
+        for key in group:
+            item = data[key]
+            try:
+                sendmail(
+                    item.get("subject"),
+                    item.get("content"),
+                    item.get("recepients"),
+                    item.get("cc_recepients"),
+                    item.get("bcc_recepients"),
+                    item.get("reply_tos"),
+                    promotional=item.get("promotional", promotional),
+                    reference_doctype=item.get("reference_doctype", reference_doctype),
+                    reference_name=item.get("reference_name", reference_name),
+                )
+            except Exception:
+                frappe.log_error(
+                    title=_("AWS Integration: send_email_in_batches failed for {0}").format(key),
+                    message=frappe.get_traceback(),
+                )
         time.sleep(1)
 
 

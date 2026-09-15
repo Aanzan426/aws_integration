@@ -1,0 +1,481 @@
+# Copyright (c) 2026, Hybrowlabs Technologies and Contributors
+# See license.txt
+"""Unit tests for aws_integration/utils/email.py — transport consolidation
+(Part 1): sendmail()/send_email_in_batches() now enqueue through Frappe
+core's frappe.sendmail() instead of the old raw-boto3 SES path.
+
+frappe.sendmail is always mocked here — these tests never actually send
+mail (Emails are muted on this bench anyway per house rules) and never hit
+AWS. They verify:
+  - signature compatibility (existing callers need zero changes)
+  - correct translation of arguments into frappe.sendmail() kwargs
+  - cc/bcc/reply_to normalization (None / str / list all work)
+  - recipient + email-address validation (ISS-28 delegation to core)
+  - batching/pacing behavior in send_email_in_batches
+  - one bad item does not abort the rest of a batch
+"""
+
+import types
+import unittest
+from unittest import mock
+
+import frappe
+from frappe.tests.utils import FrappeTestCase
+
+from aws_integration.utils.email import (
+    is_html,
+    sendmail,
+    send_email_in_batches,
+    validate_email,
+)
+
+
+def _fake_settings(source_email="notifications@unityedu.test", sender_name="Unity Notices"):
+    """A minimal stand-in for the AWS Settings single doctype, with just the
+    attributes sendmail() reads off it."""
+    return types.SimpleNamespace(source_email=source_email, sender_name=sender_name)
+
+
+_REAL_GET_CACHED_DOC = frappe.get_cached_doc
+
+
+def _patch_aws_settings(source_email="notifications@unityedu.test", sender_name="Unity Notices"):
+    """Patch ``frappe.get_cached_doc`` so ONLY "AWS Settings" lookups are
+    stubbed; every other doctype falls through to the real
+    ``frappe.get_cached_doc``.
+
+    NOTE (post-review, round 2): a blanket ``mock.patch(..., return_value=...)``
+    used to be safe here because ``sendmail()`` was the only thing calling
+    ``frappe.get_cached_doc`` in these tests. Now that ``sendmail()`` also
+    writes a real "AWS SES Logs" record (the observability fix), a real
+    ``doc.insert()`` runs underneath — which internally calls
+    ``frappe.utils.now_datetime()`` -> ``get_system_timezone()`` ->
+    ``frappe.get_system_settings()`` -> ``frappe.get_cached_doc("System
+    Settings")``. A blanket stub would hijack that call too and return the
+    fake AWS Settings namespace instead, breaking doc insertion with an
+    AttributeError. This side_effect-based patch only intercepts "AWS
+    Settings" and delegates everything else to the real implementation.
+    """
+    settings = _fake_settings(source_email=source_email, sender_name=sender_name)
+
+    def _side_effect(doctype, *args, **kwargs):
+        if doctype == "AWS Settings":
+            return settings
+        return _REAL_GET_CACHED_DOC(doctype, *args, **kwargs)
+
+    return mock.patch(
+        "aws_integration.utils.email.frappe.get_cached_doc", side_effect=_side_effect
+    )
+
+
+class TestValidateEmail(FrappeTestCase):
+    """ISS-28: validate_email() now delegates to frappe.utils.validate_email_address
+    instead of a hand-rolled regex."""
+
+    def test_valid_addresses(self):
+        self.assertTrue(validate_email("student.parent@example.com"))
+        self.assertTrue(validate_email("Name Here <name.here@example.co.in>"))
+
+    def test_invalid_addresses(self):
+        self.assertFalse(validate_email(""))
+        self.assertFalse(validate_email(None))
+        self.assertFalse(validate_email("not-an-email"))
+        self.assertFalse(validate_email("@example.com"))
+        self.assertFalse(validate_email("user@"))
+        self.assertFalse(validate_email("user@domain"))
+
+    def test_multi_at_address_is_rejected(self):
+        # REGRESSION (post-review, round 2): frappe.utils.validate_email_address()
+        # parses its input via email.utils.parseaddr and, for a malformed
+        # multi-"@" string like "a@b@c.com", truncates it to "b@c.com" and
+        # returns that as a valid address instead of rejecting the whole
+        # string — the OLD hand-rolled regex here correctly rejected this.
+        # validate_email() now adds a narrow parseaddr-based guard in front
+        # of core specifically to close this gap. This was previously
+        # (incorrectly) asserted as "inherited, acceptable leniency" — it
+        # is not; it was a real regression, now fixed.
+        self.assertFalse(validate_email("a@b@c.com"))
+        # Same malformed address, bracketed — core's leniency (and the bug)
+        # applies here too.
+        self.assertFalse(validate_email("Name <a@b@c.com>"))
+
+    def test_is_html_unchanged(self):
+        # is_html() is no longer used by sendmail() internally, but stays
+        # exported for backward compatibility — verify it still works.
+        self.assertTrue(is_html("<p>Hello</p>"))
+        self.assertFalse(is_html("Plain text only"))
+
+
+class TestSendmailSignatureCompatibility(FrappeTestCase):
+    """Every existing caller (edu_quality walsh/admin.py, unity_parent_app
+    api/admin.py) calls sendmail(subject, message, recepient, cc_recepient,
+    bcc_recepient[, reply_tos]) — verify that exact shape still works,
+    positionally and by keyword."""
+
+    def setUp(self):
+        self.settings_patch = _patch_aws_settings()
+        self.settings_patch.start()
+        self.addCleanup(self.settings_patch.stop)
+
+    @mock.patch("aws_integration.utils.email.frappe.sendmail")
+    def test_positional_call_matches_existing_callers(self, mock_sendmail):
+        sendmail(
+            "Notice Subject",
+            "<p>Body</p>",
+            ["parent@example.com"],
+            ["cc@example.com"],
+            ["bcc@example.com"],
+        )
+        self.assertEqual(mock_sendmail.call_count, 1)
+
+    @mock.patch("aws_integration.utils.email.frappe.sendmail")
+    def test_keyword_call_with_reply_tos(self, mock_sendmail):
+        sendmail(
+            subject="Notice Subject",
+            message="Body text",
+            recepient=["parent@example.com"],
+            cc_recepient=[],
+            bcc_recepient=[],
+            reply_tos=["office@example.com"],
+        )
+        kwargs = mock_sendmail.call_args.kwargs
+        self.assertEqual(kwargs["reply_to"], "office@example.com")
+
+    @mock.patch("aws_integration.utils.email.frappe.sendmail")
+    def test_single_string_recipient_allowed(self, mock_sendmail):
+        # boto3-era callers sometimes passed a bare string rather than a
+        # single-element list; both shapes must keep working.
+        sendmail("Subject", "Body", "parent@example.com", None, None)
+        kwargs = mock_sendmail.call_args.kwargs
+        self.assertEqual(kwargs["recipients"], ["parent@example.com"])
+
+
+class TestSendmailRoutesThroughCore(FrappeTestCase):
+    """Verify sendmail() calls Frappe core's frappe.sendmail() with the
+    right translation of arguments — this is the actual Route B -> Route A
+    behavior under test."""
+
+    def setUp(self):
+        self.settings_patch = _patch_aws_settings()
+        self.settings_patch.start()
+        self.addCleanup(self.settings_patch.stop)
+
+    @mock.patch("aws_integration.utils.email.frappe.sendmail")
+    def test_recipients_cc_bcc_and_subject_message_passthrough(self, mock_sendmail):
+        sendmail(
+            "Fee Reminder",
+            "<b>Please pay</b>",
+            ["a@example.com", "b@example.com"],
+            ["cc1@example.com"],
+            ["bcc1@example.com"],
+        )
+        kwargs = mock_sendmail.call_args.kwargs
+        self.assertEqual(kwargs["recipients"], ["a@example.com", "b@example.com"])
+        self.assertEqual(kwargs["cc"], ["cc1@example.com"])
+        self.assertEqual(kwargs["bcc"], ["bcc1@example.com"])
+        self.assertEqual(kwargs["subject"], "Fee Reminder")
+        self.assertEqual(kwargs["message"], "<b>Please pay</b>")
+
+    @mock.patch("aws_integration.utils.email.frappe.sendmail")
+    def test_sender_built_from_aws_settings(self, mock_sendmail):
+        sendmail("Subject", "Body", ["a@example.com"], None, None)
+        kwargs = mock_sendmail.call_args.kwargs
+        self.assertEqual(kwargs["sender"], "Unity Notices <notifications@unityedu.test>")
+
+    @mock.patch("aws_integration.utils.email.frappe.sendmail")
+    def test_sender_falls_back_to_bare_email_without_sender_name(self, mock_sendmail):
+        with _patch_aws_settings(source_email="notifications@unityedu.test", sender_name=""):
+            sendmail("Subject", "Body", ["a@example.com"], None, None)
+        kwargs = mock_sendmail.call_args.kwargs
+        self.assertEqual(kwargs["sender"], "notifications@unityedu.test")
+
+    @mock.patch("aws_integration.utils.email.frappe.sendmail")
+    def test_delayed_true_so_it_enqueues_rather_than_sends_synchronously(self, mock_sendmail):
+        # This is the whole point of the consolidation: mail goes into the
+        # Email Queue and is delivered by the existing (untouched) flush
+        # toggle in AWSSettings.handle_email_flush(), not sent inline here.
+        sendmail("Subject", "Body", ["a@example.com"], None, None)
+        kwargs = mock_sendmail.call_args.kwargs
+        self.assertTrue(kwargs["delayed"])
+
+    @mock.patch("aws_integration.utils.email.frappe.sendmail")
+    def test_multiple_reply_tos_uses_first_and_does_not_raise(self, mock_sendmail):
+        # Core frappe.sendmail() only supports a single Reply-To string;
+        # boto3 SES accepted a list. Verify the graceful degradation.
+        sendmail(
+            "Subject",
+            "Body",
+            ["a@example.com"],
+            None,
+            None,
+            reply_tos=["first@example.com", "second@example.com"],
+        )
+        kwargs = mock_sendmail.call_args.kwargs
+        self.assertEqual(kwargs["reply_to"], "first@example.com")
+
+    @mock.patch("aws_integration.utils.email.frappe.sendmail")
+    def test_no_reply_to_when_not_given(self, mock_sendmail):
+        sendmail("Subject", "Body", ["a@example.com"], None, None)
+        kwargs = mock_sendmail.call_args.kwargs
+        self.assertIsNone(kwargs["reply_to"])
+
+
+class TestSendmailWritesSesLog(FrappeTestCase):
+    """OBSERVABILITY FIX (post-review, round 2): sendmail() must write an
+    "AWS SES Logs" record for every attempt — success (status "Sent") and,
+    as an improvement over the old boto3-era behavior, failure too (status
+    "Not Sent") — since send_email_in_batches() swallows individual
+    failures and this doctype is the only per-attempt trace left otherwise.
+    edu_quality's permission_import.py and unity_dev_tools's
+    anonymize_core.py both assume this doctype carries real rows."""
+
+    def setUp(self):
+        self.settings_patch = _patch_aws_settings()
+        self.settings_patch.start()
+        self.addCleanup(self.settings_patch.stop)
+
+    @mock.patch("aws_integration.utils.email.frappe.sendmail")
+    def test_successful_send_writes_sent_log(self, mock_sendmail):
+        mock_sendmail.return_value = None
+        before = frappe.db.count("AWS SES Logs")
+
+        sendmail(
+            "Fee Reminder",
+            "<b>Please pay</b>",
+            ["parent@example.com"],
+            ["cc@example.com"],
+            None,
+        )
+
+        self.assertEqual(frappe.db.count("AWS SES Logs"), before + 1)
+        log = frappe.get_last_doc("AWS SES Logs")
+        self.assertEqual(log.status, "Sent")
+        self.assertEqual(log.subject, "Fee Reminder")
+        self.assertEqual(log.message, "<b>Please pay</b>")
+        self.assertEqual(log.recepients, "parent@example.com")
+        self.assertEqual(log.cc_recepients, "cc@example.com")
+        # "from" stores whatever sendmail() built as the sender (display
+        # name + address, matching what frappe.sendmail() itself was given).
+        # Frappe's Data fieldtype HTML-escapes "<"/">" on save.
+        self.assertEqual(log.get("from"), "Unity Notices &lt;notifications@unityedu.test&gt;")
+
+    @mock.patch("aws_integration.utils.email.frappe.sendmail")
+    def test_failed_send_writes_not_sent_log_and_still_raises(self, mock_sendmail):
+        mock_sendmail.side_effect = frappe.ValidationError("boom")
+        before = frappe.db.count("AWS SES Logs")
+
+        with self.assertRaises(frappe.ValidationError):
+            sendmail("Subject", "Body", ["parent@example.com"], None, None)
+
+        self.assertEqual(frappe.db.count("AWS SES Logs"), before + 1)
+        log = frappe.get_last_doc("AWS SES Logs")
+        self.assertEqual(log.status, "Not Sent")
+
+    @mock.patch("aws_integration.utils.email.frappe.sendmail")
+    def test_validation_failure_before_core_call_writes_no_log(self, mock_sendmail):
+        # A bad recipient address never even reaches frappe.sendmail() —
+        # nothing was attempted, so nothing should be logged.
+        before = frappe.db.count("AWS SES Logs")
+
+        with self.assertRaises(frappe.ValidationError):
+            sendmail("Subject", "Body", ["not-an-email"], None, None)
+
+        mock_sendmail.assert_not_called()
+        self.assertEqual(frappe.db.count("AWS SES Logs"), before)
+
+
+class TestSendmailValidation(FrappeTestCase):
+    def setUp(self):
+        self.settings_patch = _patch_aws_settings()
+        self.settings_patch.start()
+        self.addCleanup(self.settings_patch.stop)
+
+    @mock.patch("aws_integration.utils.email.frappe.sendmail")
+    def test_no_recipient_raises_and_does_not_call_core_sendmail(self, mock_sendmail):
+        with self.assertRaises(frappe.ValidationError):
+            sendmail("Subject", "Body", None, None, None)
+        mock_sendmail.assert_not_called()
+
+    @mock.patch("aws_integration.utils.email.frappe.sendmail")
+    def test_empty_recipient_list_raises(self, mock_sendmail):
+        with self.assertRaises(frappe.ValidationError):
+            sendmail("Subject", "Body", [], None, None)
+        mock_sendmail.assert_not_called()
+
+    @mock.patch("aws_integration.utils.email.frappe.sendmail")
+    def test_invalid_recipient_address_raises(self, mock_sendmail):
+        with self.assertRaises(frappe.ValidationError):
+            sendmail("Subject", "Body", ["not-an-email"], None, None)
+        mock_sendmail.assert_not_called()
+
+    @mock.patch("aws_integration.utils.email.frappe.sendmail")
+    def test_invalid_cc_address_raises(self, mock_sendmail):
+        with self.assertRaises(frappe.ValidationError):
+            sendmail("Subject", "Body", ["ok@example.com"], ["bad-cc"], None)
+        mock_sendmail.assert_not_called()
+
+
+class TestSendEmailInBatches(FrappeTestCase):
+    """send_email_in_batches(data) — structure documented in the function's
+    own docstring: {key: {subject, content, recepients, cc_recepients,
+    bcc_recepients, reply_tos}}."""
+
+    def setUp(self):
+        self.settings_patch = _patch_aws_settings()
+        self.settings_patch.start()
+        self.addCleanup(self.settings_patch.stop)
+
+        self.sleep_patch = mock.patch("aws_integration.utils.email.time.sleep")
+        self.mock_sleep = self.sleep_patch.start()
+        self.addCleanup(self.sleep_patch.stop)
+
+    def _batch_size_patch(self, size):
+        return mock.patch(
+            "aws_integration.utils.email.frappe.get_value", return_value=size
+        )
+
+    @mock.patch("aws_integration.utils.email.frappe.sendmail")
+    def test_calls_sendmail_once_per_item(self, mock_sendmail):
+        data = {
+            "s1": {
+                "subject": "Sub1",
+                "content": "Body1",
+                "recepients": ["s1@example.com"],
+                "cc_recepients": [],
+                "bcc_recepients": [],
+            },
+            "s2": {
+                "subject": "Sub2",
+                "content": "Body2",
+                "recepients": ["s2@example.com"],
+                "cc_recepients": [],
+                "bcc_recepients": [],
+            },
+        }
+        with self._batch_size_patch(5):
+            send_email_in_batches(data)
+        self.assertEqual(mock_sendmail.call_count, 2)
+
+    @mock.patch("aws_integration.utils.email.frappe.sendmail")
+    def test_reply_tos_now_passed_through(self, mock_sendmail):
+        # Pre-existing bug fix: the old implementation accepted a
+        # "reply_tos" key per its own documented structure but never
+        # forwarded it to sendmail(). Verify it now does.
+        data = {
+            "s1": {
+                "subject": "Sub1",
+                "content": "Body1",
+                "recepients": ["s1@example.com"],
+                "cc_recepients": [],
+                "bcc_recepients": [],
+                "reply_tos": ["office@example.com"],
+            },
+        }
+        with self._batch_size_patch(5):
+            send_email_in_batches(data)
+        kwargs = mock_sendmail.call_args.kwargs
+        self.assertEqual(kwargs["reply_to"], "office@example.com")
+
+    @mock.patch("aws_integration.utils.email.frappe.sendmail")
+    def test_batching_respects_email_batch_size_and_sleeps_between_chunks(self, mock_sendmail):
+        data = {
+            f"s{i}": {
+                "subject": "Sub",
+                "content": "Body",
+                "recepients": [f"s{i}@example.com"],
+                "cc_recepients": [],
+                "bcc_recepients": [],
+            }
+            for i in range(5)
+        }
+        with self._batch_size_patch(2):
+            send_email_in_batches(data)
+        # 5 items / batch size 2 -> 3 chunks (2, 2, 1) -> 3 sleeps
+        self.assertEqual(self.mock_sleep.call_count, 3)
+        self.assertEqual(mock_sendmail.call_count, 5)
+
+    @mock.patch("aws_integration.utils.email.frappe.sendmail")
+    def test_zero_or_missing_batch_size_does_not_hang_or_crash(self, mock_sendmail):
+        data = {
+            "s1": {
+                "subject": "Sub",
+                "content": "Body",
+                "recepients": ["s1@example.com"],
+                "cc_recepients": [],
+                "bcc_recepients": [],
+            },
+        }
+        with self._batch_size_patch(None):
+            send_email_in_batches(data)
+        self.assertEqual(mock_sendmail.call_count, 1)
+
+    @mock.patch("aws_integration.utils.email.frappe.log_error")
+    @mock.patch("aws_integration.utils.email.sendmail")
+    def test_one_bad_item_does_not_abort_the_rest_of_the_batch(
+        self, mock_sendmail, mock_log_error
+    ):
+        # sendmail() can now raise synchronously (e.g. invalid address).
+        # The old boto3 path never raised (it caught-and-logged internally),
+        # so send_email_in_batches must not regress the "bad row doesn't
+        # block the batch" behavior existing callers rely on.
+        def side_effect(subject, message, recepient, cc, bcc, reply_tos=None, **kwargs):
+            # PART 2: send_email_in_batches() now also passes
+            # promotional/reference_doctype/reference_name kwargs through
+            # to sendmail() on every call — accept (and ignore) them here
+            # via **kwargs so this Part 1 regression test still exercises
+            # only what it originally cared about.
+            if recepient == ["bad@example.com"]:
+                raise frappe.ValidationError("bad address")
+            return None
+
+        mock_sendmail.side_effect = side_effect
+
+        data = {
+            "good1": {
+                "subject": "Sub",
+                "content": "Body",
+                "recepients": ["good1@example.com"],
+                "cc_recepients": [],
+                "bcc_recepients": [],
+            },
+            "bad": {
+                "subject": "Sub",
+                "content": "Body",
+                "recepients": ["bad@example.com"],
+                "cc_recepients": [],
+                "bcc_recepients": [],
+            },
+            "good2": {
+                "subject": "Sub",
+                "content": "Body",
+                "recepients": ["good2@example.com"],
+                "cc_recepients": [],
+                "bcc_recepients": [],
+            },
+        }
+        with self._batch_size_patch(5):
+            send_email_in_batches(data)
+
+        self.assertEqual(mock_sendmail.call_count, 3)
+        mock_log_error.assert_called_once()
+
+
+class TestAWSSettingsSendEmailDeprecated(FrappeTestCase):
+    """AWS Settings.send_email() (the direct boto3 SES method) is now dead
+    code — verify it throws loudly instead of silently doing the old,
+    bypassing-the-queue thing if anyone still calls it directly."""
+
+    def test_raises_when_called_directly(self):
+        settings = frappe.get_single("AWS Settings")
+        with self.assertRaises(frappe.ValidationError):
+            settings.send_email(
+                destinations=types.SimpleNamespace(
+                    to_service_format=lambda: {"ToAddresses": ["a@example.com"]}
+                ),
+                subject="Subject",
+                content="Body",
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()

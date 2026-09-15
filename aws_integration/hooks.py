@@ -30,6 +30,18 @@ doc_events = {
 	}
 }
 
+# Email hooks
+# ---------------
+
+# email-governance-engine Part 2: inject X-SES-Configuration-Set (always,
+# when configured) and List-Unsubscribe (only for sends explicitly marked
+# promotional=True) onto every outbound email in this bench. See
+# aws_integration/utils/email_headers.py for full design rationale — in
+# particular why List-Unsubscribe-Post (RFC 8058 one-click) is deliberately
+# NOT injected yet (deferred to Part 3's suppression doctype + POST
+# endpoint).
+make_email_body_message = "aws_integration.utils.email_headers.inject_governance_headers"
+
 # Scheduled Tasks
 # ---------------
 
